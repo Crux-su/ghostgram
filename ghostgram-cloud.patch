@@ -1266,7 +1266,7 @@ index b671ae52..648ea3bc 100644
          ":BuildNumberInfoPlist",
 diff --git a/build-system/sideload_build.py b/build-system/sideload_build.py
 new file mode 100644
-index 00000000..ac37b29d
+index 00000000..9d8fedec
 --- /dev/null
 +++ b/build-system/sideload_build.py
 @@ -0,0 +1,164 @@
@@ -1395,7 +1395,7 @@ index 00000000..ac37b29d
 +        # Supported by the pinned rules_apple codesigning_support.bzl, unlike apple.codesign=0.
 +        command.common_build_args.extend([
 +            '--features=disable_legacy_signing', '--//Telegram:disableExtensions',
-+            '--define=GG_SIDELOAD=1', '--swiftcopt=-DGG_SIDELOAD',
++            '--define=GG_SIDELOAD=1', '--@build_bazel_rules_swift//swift:copt=-DGG_SIDELOAD',
 +            '--jobs=2', '--local_resources=memory=4096',
 +        ])
 +        # Avoid dSYM output on the small hosted runner; always build the full application.

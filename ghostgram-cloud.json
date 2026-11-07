@@ -1,0 +1,5 @@
+{
+  "base": "2a6b08272b7da893f88986846022bafd0727df89",
+  "sha256": "415d379ee2af94908acf87a6227df3565ddd9341e3d6862765ecd8eec371480a",
+  "patch": "ghostgram-cloud.patch"
+}

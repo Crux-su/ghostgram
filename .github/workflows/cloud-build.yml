@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'check: compile only; package: IPA using your Telegram API secrets'
+        description: 'sample: test IPA without keys; check: compile only; package: your API secrets'
         type: choice
-        options: [check, package]
-        default: check
+        options: [sample, check, package]
+        default: sample
         required: true
 
 permissions:

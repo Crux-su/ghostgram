@@ -1,0 +1,112 @@
+name: Ghostgram Sideload IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'check: compile only; package: IPA using your Telegram API secrets'
+        type: choice
+        options: [check, package]
+        default: check
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghostgram-sideload-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify and apply pinned local changes
+        run: |
+          python3 - <<'PY'
+          import hashlib, pathlib, subprocess
+          patch = pathlib.Path('ghostgram-cloud.patch')
+          expected = 'e7e4b510a2077d1c10ab9a20c5a2b456b3da0af20502f4c8226ec89f6626cc5a'
+          if hashlib.sha256(patch.read_bytes()).hexdigest() != expected:
+              raise SystemExit('Patch checksum mismatch')
+          subprocess.run(['git', 'merge-base', '--is-ancestor', '2a6b08272b7da893f88986846022bafd0727df89', 'HEAD'], check=True)
+          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+          subprocess.run(['git', 'apply', str(patch)], check=True)
+          PY
+      - name: Build wrapper tests
+        run: python3 -m unittest discover -s build-system/tests -p 'test_sideload_build.py' -v
+      - name: Localization and whitespace
+        run: |
+          python3 Ghostgram/Strings/check.py --strict --allow-unused
+          git diff --check
+      - name: Validate package credentials without exposing values
+        if: inputs.mode == 'package'
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+        run: |
+          python3 - <<'PY'
+          import sys, os
+          sys.path.insert(0, 'build-system')
+          from sideload_build import configuration
+          configuration(os.environ, 'package', 'org.ghostgram.local')
+          print('Telegram application credentials validated')
+          PY
+
+  build:
+    needs: checks
+    runs-on: xcode-27
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: recursive
+      - name: Verify and apply pinned local changes
+        run: |
+          python3 - <<'PY'
+          import hashlib, pathlib, subprocess
+          patch = pathlib.Path('ghostgram-cloud.patch')
+          expected = 'e7e4b510a2077d1c10ab9a20c5a2b456b3da0af20502f4c8226ec89f6626cc5a'
+          if hashlib.sha256(patch.read_bytes()).hexdigest() != expected:
+              raise SystemExit('Patch checksum mismatch')
+          subprocess.run(['git', 'merge-base', '--is-ancestor', '2a6b08272b7da893f88986846022bafd0727df89', 'HEAD'], check=True)
+          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+          subprocess.run(['git', 'apply', str(patch)], check=True)
+          PY
+      - name: Select required Xcode and inspect resources
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json; print(json.load(open("versions.json"))["xcode"])')"
+          test -d "/Applications/Xcode_${version}.app/Contents/Developer"
+          sudo xcode-select -s "/Applications/Xcode_${version}.app/Contents/Developer"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          df -h .
+          sysctl hw.memsize
+      - name: Build full arm64 app without Apple signing credentials
+        env:
+          BUILD_MODE: ${{ inputs.mode }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+        run: |
+          set -euo pipefail
+          python3 build-system/sideload_build.py --mode "$BUILD_MODE" --build-number "$BUILD_NUMBER"
+      - name: Upload verified output
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ghostgram-${{ inputs.mode }}-${{ github.run_number }}
+          path: |
+            build-output/sideload/Ghostgram-Sideload.ipa
+            build-output/sideload/SHA256SUMS.txt
+            build-output/sideload/build-info.json
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0

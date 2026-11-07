@@ -11,7 +11,7 @@ index 00000000..618add53
 +    - xcode-27
 diff --git a/.github/workflows/ghostgram-sideload.yml b/.github/workflows/ghostgram-sideload.yml
 new file mode 100644
-index 00000000..10a0cc3f
+index 00000000..21b7ffc6
 --- /dev/null
 +++ b/.github/workflows/ghostgram-sideload.yml
 @@ -0,0 +1,86 @@
@@ -21,10 +21,10 @@ index 00000000..10a0cc3f
 +  workflow_dispatch:
 +    inputs:
 +      mode:
-+        description: 'check: compile only; package: IPA using your Telegram API secrets'
++        description: 'sample: test IPA without keys; check: compile only; package: your API secrets'
 +        type: choice
-+        options: [check, package]
-+        default: check
++        options: [sample, check, package]
++        default: sample
 +        required: true
 +
 +permissions:
@@ -1266,10 +1266,10 @@ index b671ae52..648ea3bc 100644
          ":BuildNumberInfoPlist",
 diff --git a/build-system/sideload_build.py b/build-system/sideload_build.py
 new file mode 100644
-index 00000000..9d8fedec
+index 00000000..3ea5983e
 --- /dev/null
 +++ b/build-system/sideload_build.py
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,168 @@
 +#!/usr/bin/env python3
 +"""Full device build for later Sideloadly signing; never imports Apple credentials."""
 +import argparse
@@ -1294,9 +1294,13 @@ index 00000000..9d8fedec
 +        raise ValueError('Invalid bundle ID')
 +    if bundle_id in ('ph.telegra.Telegraph', 'org.ghostgram.app'):
 +        raise ValueError('Use a separate bundle ID for the sideload build')
-+    if mode not in ('check', 'package'):
++    if mode not in ('check', 'package', 'sample'):
 +        raise ValueError('Unknown build mode')
 +    api_id, api_hash = ('1', '0' * 32) if mode == 'check' else (env.get('TG_API_ID', ''), env.get('TG_API_HASH', ''))
++    if mode == 'sample':
++        # Telegram ships this public sample for testing; its server-side limits remain.
++        sample = json.loads((Path(__file__).parent / 'appstore-configuration.json').read_text())
++        api_id, api_hash = str(sample['api_id']), str(sample['api_hash'])
 +    if not re.fullmatch(r'[1-9][0-9]{0,9}', api_id) or int(api_id) > 2147483647:
 +        raise ValueError('Set TG_API_ID to your Telegram application ID in repository secrets')
 +    if not re.fullmatch(r'[0-9a-fA-F]{32}', api_hash) or (mode == 'package' and api_hash == '0' * 32):
@@ -1409,19 +1413,19 @@ index 00000000..9d8fedec
 +    metadata.update(mode=args.mode, commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
 +                    xcode=versions['xcode'], buildNumber=args.build_number, signed=False,
 +                    deviceTested=False, simulatorTested=False)
-+    if args.mode == 'package':
++    if args.mode != 'check':
 +        destination = out / 'Ghostgram-Sideload.ipa'
 +        shutil.copyfile(ipa, destination)
 +        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
 +        metadata['sha256'] = digest
 +        (out / 'SHA256SUMS.txt').write_text(f'{digest}  Ghostgram-Sideload.ipa\n')
 +    (out / 'build-info.json').write_text(json.dumps(metadata, indent=2) + '\n')
-+    print('Build verified. ' + ('IPA ready for re-signing.' if args.mode == 'package' else 'Check-only: no installable IPA published.'))
++    print('Build verified. ' + ('Check-only: no installable IPA published.' if args.mode == 'check' else 'IPA ready for re-signing; device testing required.'))
 +
 +
 +def main():
 +    parser = argparse.ArgumentParser(description=__doc__)
-+    parser.add_argument('--mode', choices=['check', 'package'], default='check')
++    parser.add_argument('--mode', choices=['check', 'package', 'sample'], default='check')
 +    parser.add_argument('--bundle-id', default='org.ghostgram.local')
 +    parser.add_argument('--build-number', type=int, default=1)
 +    try:
@@ -1436,10 +1440,10 @@ index 00000000..9d8fedec
 +    sys.exit(main())
 diff --git a/build-system/tests/test_sideload_build.py b/build-system/tests/test_sideload_build.py
 new file mode 100644
-index 00000000..d2071377
+index 00000000..76c1e334
 --- /dev/null
 +++ b/build-system/tests/test_sideload_build.py
-@@ -0,0 +1,74 @@
+@@ -0,0 +1,80 @@
 +import importlib.util
 +import plistlib
 +import struct
@@ -1479,6 +1483,12 @@ index 00000000..d2071377
 +        self.assertEqual(result['team_id'], '0000000000')
 +        self.assertEqual(result['api_id'], '1234')
 +
++    def test_sample_mode_uses_upstream_public_example_without_user_secrets(self):
++        result = build.configuration({}, 'sample', 'org.ghostgram.local')
++        self.assertEqual(result['api_id'], '8')
++        self.assertRegex(result['api_hash'], r'^[0-9a-f]{32}$')
++        self.assertNotEqual(result['api_hash'], '0' * 32)
++
 +    def archive(self, folder, platform=2, extensions=False):
 +        path = Path(folder) / 'app.ipa'
 +        # A minimal arm64 Mach-O with LC_BUILD_VERSION; platform 2 is device iOS, 7 simulator.
@@ -1516,15 +1526,17 @@ index 00000000..d2071377
 +    unittest.main()
 diff --git a/docs/SIDELOAD-CLOUD.md b/docs/SIDELOAD-CLOUD.md
 new file mode 100644
-index 00000000..6a0027df
+index 00000000..305aed6b
 --- /dev/null
 +++ b/docs/SIDELOAD-CLOUD.md
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,29 @@
 +# Ghostgram с Windows: облачная сборка
 +
 +Workflow **Ghostgram Sideload IPA** запускается вручную во вкладке Actions.
 +
 +## Первый запуск
++
++Для личного тестирования без своих ключей выберите `mode: sample` (режим по умолчанию). Он использует публичные тестовые API-параметры из `build-system/appstore-configuration.json`, совпадающие с примером TelegramMessenger/Telegram-iOS. Результат — IPA для переподписи. Telegram ограничивает этот API ID на сервере: вход может завершиться `API_ID_PUBLISHED_FLOOD`; это не исправляется переподписью. Для стабильного использования нужен собственный API ID. Никаких пользовательских ключей или Apple ID в этом режиме вводить не нужно.
 +
 +Выберите `mode: check`. Собирается полное приложение arm64 с тестовыми API-параметрами. Результат — только `build-info.json`: IPA для установки не публикуется. Это позволяет найти ошибки компиляции без ваших ключей и сертификатов.
 +

@@ -204,7 +204,7 @@ index b7f4184f..b45c1efe 100644
 +    }
 +}
 diff --git a/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsHooks.swift b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsHooks.swift
-index 2512a061..0aea4d86 100644
+index 2512a061..8b9449c8 100644
 --- a/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsHooks.swift
 +++ b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsHooks.swift
 @@ -11,7 +11,7 @@ import GiftViewScreen
@@ -216,9 +216,15 @@ index 2512a061..0aea4d86 100644
  // pinning and hidden ones respected), hide and pin on a fake are handled locally, and
  // the "…" menu of any gift's screen offers "Add to my profile" (or "Edit" / "Delete" on a
  // fake). The gate comes first: with the feature off nothing is read.
-@@ -26,10 +26,10 @@ enum GGFakeGiftsHooks {
+@@ -25,11 +25,16 @@ enum GGFakeGiftsHooks {
+             GGFakeGiftsStore.shared.accountWillBeRemoved(id)
          })
  
++        GGGiftHooks.chatMessages.register({ account, peerId in
++            guard GGFakeGiftsSettings.isEnabled.value else { return [] }
++            return GGFakeGiftsStore.shared.chatMessages(accountPeerId: account.peerId, recipientPeerId: peerId)
++        })
++
          GGGiftHooks.profileGifts.register({ state, query in
 -            guard GGFakeGiftsSettings.isEnabled.value, query.collectionId == nil, query.peerId == query.account.peerId else {
 +            guard GGFakeGiftsSettings.isEnabled.value, query.collectionId == nil else {
@@ -229,7 +235,7 @@ index 2512a061..0aea4d86 100644
              if fakes.isEmpty {
                  return
              }
-@@ -38,7 +38,7 @@ enum GGFakeGiftsHooks {
+@@ -38,7 +43,7 @@ enum GGFakeGiftsHooks {
          })
  
          GGGiftHooks.localGiftAction.register({ reference, action, query in
@@ -238,7 +244,7 @@ index 2512a061..0aea4d86 100644
                  return false
              }
              switch action {
-@@ -52,7 +52,7 @@ enum GGFakeGiftsHooks {
+@@ -52,7 +57,7 @@ enum GGFakeGiftsHooks {
  
          // A fake takes no slot of the server's pin limit and never reaches the server's pinned list.
          GGGiftHooks.isLocalGift.register({ reference, account in
@@ -247,7 +253,7 @@ index 2512a061..0aea4d86 100644
          })
  
          GGGiftViewHooks.menuItems.register({ menuContext in
-@@ -62,6 +62,41 @@ enum GGFakeGiftsHooks {
+@@ -62,6 +67,41 @@ enum GGFakeGiftsHooks {
              return GGFakeGiftsStore.localId(of: menuContext.reference, accountPeerId: menuContext.context.account.peerId) != nil
          })
  
@@ -347,7 +353,7 @@ index 5fa1e96c..d615d79f 100644
          let senderLabel: String
          if record.nameHidden {
 diff --git a/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsStore.swift b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsStore.swift
-index 03abfc86..85610743 100644
+index 03abfc86..3295e3ba 100644
 --- a/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsStore.swift
 +++ b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsStore.swift
 @@ -4,7 +4,7 @@ import Postbox
@@ -391,7 +397,15 @@ index 03abfc86..85610743 100644
          let resolveDisposable = MetaDisposable()
  
          init(id: AccountRecordId, peerId: PeerId, basePath: String, postbox: Postbox) {
-@@ -86,9 +91,13 @@ final class GGFakeGiftsStore {
+@@ -78,6 +83,7 @@ final class GGFakeGiftsStore {
+     /// What the profile shows, per account peer. Read on the main thread on every gift list push.
+     private var resolved: [PeerId: [ProfileGiftsContext.State.StarGift]] = [:]
+     private var recordSnapshots: [PeerId: [GGFakeGiftRecord]] = [:]
++    private var resolvedChatMessages: [PeerId: [Message]] = [:]
+ 
+     private let changesPipe = ValuePipe<PeerId>()
+ 
+@@ -86,9 +92,13 @@ final class GGFakeGiftsStore {
  
      // MARK: - Reading (any thread)
  
@@ -407,7 +421,20 @@ index 03abfc86..85610743 100644
          }
      }
  
-@@ -108,9 +117,10 @@ final class GGFakeGiftsStore {
+@@ -98,6 +108,12 @@ final class GGFakeGiftsStore {
+         }
+     }
+ 
++    func chatMessages(accountPeerId: PeerId, recipientPeerId: PeerId) -> [Message] {
++        return self.lock.withLock {
++            return (self.resolvedChatMessages[accountPeerId] ?? []).filter { $0.id.peerId == recipientPeerId }
++        }
++    }
++
+     /// Current records first, then every change of this account's list.
+     func recordsSignal(accountPeerId: PeerId) -> Signal<[GGFakeGiftRecord], NoError> {
+         return .single(self.records(accountPeerId: accountPeerId))
+@@ -108,9 +124,10 @@ final class GGFakeGiftsStore {
          })
      }
  
@@ -420,7 +447,23 @@ index 03abfc86..85610743 100644
              return nil
          }
          return id
-@@ -177,7 +187,7 @@ final class GGFakeGiftsStore {
+@@ -142,6 +159,7 @@ final class GGFakeGiftsStore {
+             self.lock.withLock {
+                 self.resolved.removeValue(forKey: peerId)
+                 self.recordSnapshots.removeValue(forKey: peerId)
++                self.resolvedChatMessages.removeValue(forKey: peerId)
+             }
+         }
+     }
+@@ -163,6 +181,7 @@ final class GGFakeGiftsStore {
+                 self.lock.withLock {
+                     self.resolved.removeAll()
+                     self.recordSnapshots.removeAll()
++                    self.resolvedChatMessages.removeAll()
+                 }
+                 for peerId in peerIds {
+                     self.changesPipe.putNext(peerId)
+@@ -177,7 +196,7 @@ final class GGFakeGiftsStore {
      // MARK: - Changes
  
      /// Adds a copy of a gift to the account's profile. `completion` on the main thread.
@@ -429,7 +472,7 @@ index 03abfc86..85610743 100644
          self.queue.async {
              guard let entry = self.entries[accountPeerId] else {
                  Queue.mainQueue().async {
-@@ -188,14 +198,22 @@ final class GGFakeGiftsStore {
+@@ -188,14 +207,22 @@ final class GGFakeGiftsStore {
              if entry.records == nil {
                  self.readFile(entry)
              }
@@ -455,7 +498,25 @@ index 03abfc86..85610743 100644
              }
          }
      }
-@@ -322,10 +340,21 @@ final class GGFakeGiftsStore {
+@@ -247,15 +274,13 @@ final class GGFakeGiftsStore {
+         }
+     }
+ 
+-    /// Deletes the account's fake gifts and their file.
++    /// Keep the ID sequence even when empty, so stale screens cannot target a later gift.
+     func removeAll(accountPeerId: PeerId) {
+         self.queue.async {
+             guard let entry = self.entries[accountPeerId] else {
+                 return
+             }
+-            entry.records = []
+-            try? FileManager.default.removeItem(at: entry.fileURL)
+-            self.publish(entry, records: [], gifts: [])
++            self.commit(entry, records: [])
+         }
+     }
+ 
+@@ -322,10 +347,21 @@ final class GGFakeGiftsStore {
  
      private func readFile(_ entry: AccountEntry) {
          var records: [GGFakeGiftRecord] = []
@@ -480,7 +541,7 @@ index 03abfc86..85610743 100644
          entry.records = records
          // Gifts moved from the old client by the migration.
          let accountId = entry.id.gg
-@@ -335,7 +364,11 @@ final class GGFakeGiftsStore {
+@@ -335,7 +371,11 @@ final class GGFakeGiftsStore {
              if !imported.isEmpty {
                  entry.records = imported + records
                  entry.nextLocalId = min(entry.nextLocalId, (imported.map { $0.localId }.min() ?? 0) - 1)
@@ -493,7 +554,7 @@ index 03abfc86..85610743 100644
              }
              Queue.mainQueue().async {
                  GGFakeGiftsSettings.legacyImport.reset(for: accountId)
-@@ -343,19 +376,30 @@ final class GGFakeGiftsStore {
+@@ -343,19 +383,30 @@ final class GGFakeGiftsStore {
          }
      }
  
@@ -532,7 +593,87 @@ index 03abfc86..85610743 100644
      }
  
      /// Looks the senders up once and publishes what the profile shows.
-@@ -402,6 +446,7 @@ final class GGFakeGiftsStore {
+@@ -368,10 +419,13 @@ final class GGFakeGiftsStore {
+             return
+         }
+         let accountPeerId = entry.peerId
+-        let senderIds = Set(records.compactMap { $0.fromPeer.map(PeerId.init(ggKey:)) })
++        var peerIds = Set(records.compactMap { $0.fromPeer.map(PeerId.init(ggKey:)) })
++        peerIds.formUnion(records.compactMap { $0.recipientPeer.map(PeerId.init(ggKey:)) })
++        peerIds.insert(accountPeerId)
++        let resolvedPeerIds = peerIds
+         entry.resolveDisposable.set((postbox.transaction { transaction -> [PeerId: EnginePeer] in
+             var peers: [PeerId: EnginePeer] = [:]
+-            for peerId in senderIds {
++            for peerId in resolvedPeerIds {
+                 if let peer = transaction.getPeer(peerId) {
+                     peers[peerId] = EnginePeer(peer)
+                 }
+@@ -383,15 +437,19 @@ final class GGFakeGiftsStore {
+                 return
+             }
+             let gifts = records.map { GGFakeGiftsStore.profileGift($0, accountPeerId: accountPeerId, peers: peers) }
+-            self.publish(entry, records: records, gifts: gifts)
++            let messages = zip(records, gifts).compactMap { record, gift in
++                return GGFakeGiftsStore.chatMessage(record, gift: gift, accountPeerId: accountPeerId, peers: peers)
++            }
++            self.publish(entry, records: records, gifts: gifts, chatMessages: messages)
+         }))
+     }
+ 
+-    private func publish(_ entry: AccountEntry, records: [GGFakeGiftRecord], gifts: [ProfileGiftsContext.State.StarGift]) {
++    private func publish(_ entry: AccountEntry, records: [GGFakeGiftRecord], gifts: [ProfileGiftsContext.State.StarGift], chatMessages: [Message] = []) {
+         let peerId = entry.peerId
+         self.lock.withLock {
+             self.resolved[peerId] = gifts
+             self.recordSnapshots[peerId] = records
++            self.resolvedChatMessages[peerId] = chatMessages
+         }
+         self.changesPipe.putNext(peerId)
+         Queue.mainQueue().async {
+@@ -399,9 +457,49 @@ final class GGFakeGiftsStore {
+         }
+     }
+ 
++    /// Older market records already carry recipientPeer; plain profile copies do not get chat cards.
++    /// The JSON record is the only persisted source. No StoreMessage, send flags or network writes.
++    private static func chatMessage(_ record: GGFakeGiftRecord, gift: ProfileGiftsContext.State.StarGift, accountPeerId: PeerId, peers: [PeerId: EnginePeer]) -> Message? {
++        guard let recipient = record.recipientPeer,
++              case .unique = gift.gift,
++              let identity = GGLocalGiftChatIdentity(localId: record.localId) else {
++            return nil
++        }
++        let recipientPeerId = PeerId(ggKey: recipient)
++        guard recipientPeerId.namespace == Namespaces.Peer.CloudUser else {
++            return nil
++        }
++        var messagePeers = SimpleDictionary<PeerId, Peer>()
++        for (id, peer) in peers {
++            messagePeers[id] = peer._asPeer()
++        }
++        let senderId = record.fromPeer.map(PeerId.init(ggKey:)) ?? accountPeerId
++        let action = TelegramMediaAction(action: .starGiftUnique(
++            gift: gift.gift, isUpgrade: false, isTransferred: false,
++            savedToProfile: record.savedToProfile, canExportDate: nil, transferStars: nil,
++            isRefunded: false, isPrepaidUpgrade: false, peerId: recipientPeerId,
++            senderId: record.nameHidden ? nil : senderId, savedId: record.localId,
++            resaleAmount: nil, canTransferDate: nil, canResaleDate: nil,
++            dropOriginalDetailsStars: nil, assigned: false, fromOffer: false,
++            canCraftAt: nil, isCrafted: false, text: record.text, entities: record.entities,
++            nameHidden: record.nameHidden
++        ))
++        return Message(
++            stableId: identity.stableId, stableVersion: 0,
++            id: MessageId(peerId: recipientPeerId, namespace: identity.messageNamespace, id: identity.messageId),
++            globallyUniqueId: nil, groupingKey: nil, groupInfo: nil, threadId: nil,
++            timestamp: record.date, flags: [], tags: [], globalTags: [], localTags: [],
++            customTags: [], forwardInfo: nil, author: peers[senderId]?._asPeer(), text: "",
++            attributes: [], media: [action], peers: messagePeers,
++            associatedMessages: SimpleDictionary<MessageId, Message>(), associatedMessageIds: [],
++            associatedMedia: [:], associatedThreadInfo: nil, associatedStories: [:]
++        )
++    }
++
      /// What the profile shows for a record: a collectible is owned by you and its original-info line
      /// names the chosen sender, date and caption.
      static func profileGift(_ record: GGFakeGiftRecord, accountPeerId: PeerId, peers: [PeerId: EnginePeer]) -> ProfileGiftsContext.State.StarGift {
@@ -540,7 +681,7 @@ index 03abfc86..85610743 100644
          let fromPeerId = record.fromPeer.map(PeerId.init(ggKey:))
          let fromPeer = fromPeerId.flatMap { peers[$0] }
          var gift = record.gift
-@@ -412,14 +457,14 @@ final class GGFakeGiftsStore {
+@@ -412,14 +510,14 @@ final class GGFakeGiftsStore {
                  }
                  return true
              }
@@ -557,7 +698,7 @@ index 03abfc86..85610743 100644
                  attributes: attributes,
                  availability: uniqueGift.availability,
                  giftAddress: nil,
-@@ -439,7 +484,7 @@ final class GGFakeGiftsStore {
+@@ -439,7 +537,7 @@ final class GGFakeGiftsStore {
          }
          return ProfileGiftsContext.State.StarGift(
              gift: gift,
@@ -568,13 +709,14 @@ index 03abfc86..85610743 100644
              text: record.text,
 diff --git a/Ghostgram/Features/ProfileExport/Sources/FakeGifts/LOCAL_PURCHASE_VERIFICATION.md b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/LOCAL_PURCHASE_VERIFICATION.md
 new file mode 100644
-index 00000000..200efd11
+index 00000000..adbf57e8
 --- /dev/null
 +++ b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/LOCAL_PURCHASE_VERIFICATION.md
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,55 @@
 +# Native local purchase verification
 +
-+Not compiled or run on a simulator in this Windows environment. The existing production
++Mac continuation, 2026-11-08: source changes and host regression checks are available.
++Full application compilation and iPhone/simulator UI verification are still pending. The existing production
 +source glob includes every `.swift` below `Sources`, so XCTest files must be added to a
 +separate test target rather than placed alongside these sources.
 +
@@ -583,11 +725,21 @@ index 00000000..200efd11
 +1. With Fake Gifts enabled and this account's simulation toggle enabled, enter the normal
 +   market Buy/Gift flow, select another user, add a caption and confirm. Test Stars with
 +   zero balance and TON with zero balance: no top-up screen and no purchase/transfer RPC.
-+   Observe the existing sticker success overlay and confetti; no real chat service message
-+   is created. Check the recipient's Gifts tab even when their server gift count is zero.
++   Observe the existing sticker success overlay and confetti. A local native NFT service
++   card must appear in this client's chat with the selected recipient, including an empty
++   chat. It must not appear in their client and no StoreMessage/outgoing queue write occurs.
++   Check the recipient's Gifts tab even when their server gift count is zero and story/media
++   caches have not loaded. Keep that profile open during the first add and last delete.
 +2. Verify model, pattern, backdrop, number and caption; unique owner and original recipient
 +   must be the selected user. Own-profile gift list must not contain that recipient's gift.
-+3. Restart the app and verify the gift persists. Switch to a second account and verify it
++3. Force-quit and relaunch the app. Verify one chat card and one profile gift persist.
++   Reload the chat, load older history pages, and allow server sync: no duplicates or
++   navigation anchors using a synthetic Local ID. Check timestamps equal to boundary
++   server messages. Edit caption/date/sender in the local editor: the same card updates.
++   Hide the gift from the profile: its chat card stays. Delete the gift: both disappear
++   and stay deleted after a second restart. Delete all and restart: new gifts must not
++   reuse the previous local IDs.
++    Switch to a second account and verify it
 +   does not see the first account's copies or simulation setting. Returning restores them.
 +4. Disable simulation after entering confirmation, then confirm: transaction stays local.
 +   Disable the main Fake Gifts toggle during confirmation: the local transaction is saved
@@ -607,9 +759,15 @@ index 00000000..200efd11
 +9. Record native UI transitions using the root AGENTS.md frame workflow. Inspect clipping,
 +   recipient navigation, gift sticker playback and confetti; report frame references.
 +
-+Media references use the existing MediaBox cache. Restart persistence is covered; availability
-+of animation files after clearing that cache is not guaranteed. The outgoing server-message
-+gift animation cannot occur without a real message; success uses the existing local UI effects.
++Host command: python3 -m unittest discover -s build-system/tests -p test_local_gift_projection.py -v
++executes the production identity, range and pagination helpers and reloads a persisted key in a
++second process. This does not test the application restart or full gift JSON/media decoding.
++
++Media references use the existing MediaBox cache. App restart persistence is not yet verified; availability
++of animation files after clearing that cache is not guaranteed. The card is rebuilt from fake-gifts.json for rendering only. The original Postbox history
++continues to own read states, pagination and synchronization. Tap opens native GiftView with
++the negative local reference. Chat reply/selection/reaction/context actions are disabled for
++these synthetic cards; local edit and delete are available inside GiftView.
 diff --git a/Ghostgram/Features/ProfileExport/Sources/GGProfileExportModule.swift b/Ghostgram/Features/ProfileExport/Sources/GGProfileExportModule.swift
 index b23eaa2b..f4cd01e0 100644
 --- a/Ghostgram/Features/ProfileExport/Sources/GGProfileExportModule.swift
@@ -824,6 +982,60 @@ index 00000000..5d0ee20c
 +    controllerRef = controller
 +    return controller
 +}
+diff --git a/Ghostgram/Features/ProfileExport/Tests/LocalGiftChatProjection/main.swift b/Ghostgram/Features/ProfileExport/Tests/LocalGiftChatProjection/main.swift
+new file mode 100644
+index 00000000..273d5cab
+--- /dev/null
++++ b/Ghostgram/Features/ProfileExport/Tests/LocalGiftChatProjection/main.swift
+@@ -0,0 +1,48 @@
++import Foundation
++
++func require(_ value: @autoclosure () -> Bool, _ message: String) {
++    if !value() {
++        fatalError(message)
++    }
++}
++
++if CommandLine.arguments.count == 3 {
++    let url = URL(fileURLWithPath: CommandLine.arguments[2])
++    if CommandLine.arguments[1] == "write" {
++        try Data("{\"localId\":-42}".utf8).write(to: url, options: .atomic)
++    } else {
++        let data = try Data(contentsOf: url)
++        let json = try JSONSerialization.jsonObject(with: data) as! [String: Int64]
++        let identity = GGLocalGiftChatIdentity(localId: json["localId"]!)!
++        print("\(identity.messageId):\(identity.stableId):\(identity.entryStableId)")
++    }
++} else {
++    require(GGLocalGiftChatIdentity(localId: 0) == nil, "Zero is not a local gift")
++    require(GGLocalGiftChatIdentity(localId: 1) == nil, "Server references must not become local")
++    require(GGLocalGiftChatIdentity(localId: Int64.min) == nil, "Reject IDs outside message range")
++    require(GGLocalGiftChatIdentity(localId: -2_147_483_649) == nil, "Reject overflow without trapping")
++    require(GGLocalGiftChatIdentity(localId: -2_147_483_648)?.messageId == Int32.min, "Keep lower boundary")
++    let first = GGLocalGiftChatIdentity(localId: -1)!
++    let second = GGLocalGiftChatIdentity(localId: -2)!
++    require(first.messageNamespace != 0 && first.messageNamespace != 1, "Do not alias Cloud messages or Local photo/name-change rows")
++    require(first.messageId != second.messageId && first.stableId != second.stableId, "Distinct gifts stay distinct")
++    require(first.entryStableId != (UInt64(first.stableId) | (2 << 40)), "Do not alias a server row")
++
++    func contains(_ date: Int32, _ first: Int32?, _ last: Int32?, _ earlier: Bool, _ later: Bool, _ loading: Bool = false) -> Bool {
++        return ggLocalGiftChatRangeContains(timestamp: date, firstTimestamp: first, lastTimestamp: last,
++                                           hasEarlier: earlier, hasLater: later, isLoading: loading)
++    }
++    require(contains(50, nil, nil, false, false), "Show a gift in a loaded empty chat")
++    require(!contains(50, nil, nil, true, true, true), "Do not insert into an unknown loading range")
++    require(!contains(50, 100, 200, true, false), "Do not insert an older gift into the newest page")
++    require(contains(250, 100, 200, true, false), "Newest page includes a new local gift")
++    require(!contains(250, 100, 200, false, true), "Do not insert a new gift into an older page")
++    require(contains(50, 100, 200, false, true), "Oldest page includes a gift before server history")
++    require(contains(100, 100, 200, true, true), "Include first timestamp, including same-second messages")
++    require(contains(200, 100, 200, true, true), "Include last timestamp")
++    require(!contains(50, nil, nil, true, true), "No known range means no local insertion")
++    require(ggLocalGiftChatNavigationAnchor(visibleIndex: -42, isLocalGift: true, serverBoundary: 123) == 123, "Pagination must not use a synthetic ID")
++    require(ggLocalGiftChatNavigationAnchor(visibleIndex: 124, isLocalGift: false, serverBoundary: 123) == 124, "Keep upstream navigation for real rows")
++    require(ggLocalGiftChatNavigationAnchor(visibleIndex: -42, isLocalGift: true, serverBoundary: Optional<Int>.none) == nil, "An all-local chat has no server anchor")
++    print("Local gift identity and history range checks passed")
++}
 diff --git a/Ghostgram/GGCore/Sources/Strings/Generated/GGStrings.swift b/Ghostgram/GGCore/Sources/Strings/Generated/GGStrings.swift
 index d369c4ec..a1024846 100644
 --- a/Ghostgram/GGCore/Sources/Strings/Generated/GGStrings.swift
@@ -1036,7 +1248,7 @@ index b6e5ba82..4cb0daac 100644
          #"{"menu.about.licenseFooter":"يستند Ghostgram إلى Telegram لنظام iOS ويُوزَّع بموجب الإصدار 2 من رخصة GNU GPL.","menu.about.licenseHeader":"الرخصة","menu.about.sourceCode":"الشيفرة المصدرية لـTelegram","menu.about.thirdParty":"مكونات الجهات الخارجية","menu.about.thirdPartyFooter":"انقر على مكوّن لفتح نص رخصته أو شيفرته المصدرية.","menu.about.thirdPartyInfo":"المكتبات المضمّنة في Ghostgram ورخصها","menu.about.version":"الإصدار","menu.about.versionCopied":"تم نسخ الإصدار","menu.category.appearance":"المظهر","menu.category.appearanceInfo":"الرسائل، قائمة المحادثات، اللوحات والأيقونات","menu.category.media":"الوسائط والمكالمات","menu.category.mediaInfo":"الصوت، رسائل الفيديو، المكالمات والتنزيلات","menu.category.messages":"الرسائل","menu.category.messagesInfo":"ما يُحفظ ويُرسل ويُعرض","menu.category.more":"المزيد","menu.category.moreInfo":"خدمة VPN، الشارات، الهدايا وإعدادات Ghostgram","menu.category.privacy":"الخصوصية","menu.category.privacyInfo":"ما يراه الآخرون عنك","menu.category.security":"الأمان","menu.category.securityInfo":"حماية المحادثات، رمز المرور والحسابات","menu.common.emptyTab":"ستظهر إعدادات هذا القسم هنا.","menu.common.reset":"إعادة تعيين","menu.common.resetText":"ستعود كل الإعدادات في هذه الشاشة إلى قيمها الافتراضية.","menu.common.resetTitle":"إعادة تعيين هذه الشاشة؟","menu.demo.accountToggle":"إعداد الحساب","menu.demo.accountToggleInfo":"منفصل لكل حساب","menu.demo.action":"إجراء","menu.demo.actionDone":"تم تنفيذ الإجراء","menu.demo.cards":"البطاقات","menu.demo.choice":"اختيار","menu.demo.custom":"صف مخصّص","menu.demo.dependent":"يظهر عندما يكون المفتاح مفعّلًا","menu.demo.discrete":"المستوى","menu.demo.group":"مجموعة","menu.demo.groupFirst":"الأول","menu.demo.groupSecond":"الثاني","menu.demo.groupThird":"الثالث","menu.demo.keywords":"فحص اختبار","menu.demo.levelHigh":"مرتفع","menu.demo.levelMedium":"متوسط","menu.demo.levelOff":"متوقف","menu.demo.list":"قائمة بدون مفتاح","menu.demo.listCount":"المحدد: {selected} من {total}","menu.demo.longChoice":"اختيار طويل","menu.demo.on":"مفعّل","menu.demo.optionA":"الخيار A","menu.demo.optionB":"الخيار B","menu.demo.optionC":"الخيار C","menu.demo.optionNumber":"الخيار {number}","menu.demo.previewsHeader":"المعاينات","menu.demo.restart":"يلزم إعادة التشغيل","menu.demo.rowsFooter":"تذييل القسم.","menu.demo.rowsHeader":"الصفوف","menu.demo.secondHeader":"العرض الثاني","menu.demo.segmentFirst":"الصفوف","menu.demo.segmentSecond":"العرض الثاني","menu.demo.segmentToggle":"مفتاح العرض الثاني","menu.demo.shapeRound":"دائرة","menu.demo.shapeSquare":"مربع","menu.demo.shapeSquircle":"مستدير الحواف","menu.demo.slider":"شريط التمرير","menu.demo.subtitle":"كل أنواع الصفوف وكل المعاينات","menu.demo.title":"عرض توضيحي للقائمة","menu.demo.toggle":"مفتاح","menu.demo.toggleExample":"hello → HELLO","menu.demo.topText":"فحص إطار القائمة قبل الميزات.","menu.demo.transparency":"الشفافية","menu.preview.chatListAuthor2":"أحمد","menu.preview.chatListName2":"محادثة العمل","menu.preview.chatListName3":"الأخبار","menu.preview.chatListText1":"لا تنسَ المظلة ☔️","menu.preview.chatListText2":"التقرير جاهز، ألقوا نظرة","menu.preview.chatListText3":"أبرز ما في اليوم","menu.preview.fullChat1":"هل شاهدت الفيلم الذي نصحتك به؟","menu.preview.fullChat2":"ليس بعد، سأشاهده الليلة 🍿","menu.preview.fullChat3":"أخبرني برأيك بعدها!","menu.preview.fullChat4":"بالتأكيد 👍","menu.preview.incomingText":"مرحبًا! نلتقي هذا المساء؟","menu.preview.outgoingText":"نعم، في السابعة عند المقهى.","menu.preview.peerName":"سارة","menu.preview.pendingText":"أنا في طريقي الآن","menu.preview.statusOnline":"متصل","menu.root.categories":"الفئات","menu.root.channel":"القناة","menu.root.chat":"المحادثة","menu.root.footer":"Ghostgram {version}","menu.root.forum":"المنتدى","menu.root.links":"الروابط","menu.root.searchPlaceholder":"البحث في الإعدادات","menu.root.version":"الإصدار {version}","menu.search.noResults":"لم يُعثر على شيء. جرّب كلمة أخرى.","menu.section.messages.chats":"المحادثات","menu.section.privacy.ghostMode":"وضع الشبح","menu.section.privacy.traces":"الآثار","menu.settings.dataFooter":"لا تُحفظ كلمات المرور والمفاتيح والرموز المميزة (tokens) في الملف أبدًا. وإعادة التعيين تُرجع إعدادات كل الحسابات إلى قيمها الافتراضية.","menu.settings.dataHeader":"البيانات","menu.settings.exportFailed":"تعذّر حفظ ملف الإعدادات.","menu.settings.exportInfo":"حفظ كل إعدادات Ghostgram في ملف","menu.settings.exportSettings":"تصدير الإعدادات","menu.settings.importApply":"تطبيق","menu.settings.importChanges#few":"{count} تغييرات","menu.settings.importChanges#many":"{count} تغييرًا","menu.settings.importChanges#one":"تغيير واحد","menu.settings.importChanges#other":"{count} تغيير","menu.settings.importChanges#two":"تغييران","menu.settings.importChanges#zero":"لا توجد تغييرات","menu.settings.importDone":"تم استيراد الإعدادات","menu.settings.importInfo":"مراجعة التغييرات وتطبيقها","menu.settings.importNoChanges":"الإعدادات في الملف مطابقة للإعدادات الحالية.","menu.settings.importSettings":"استيراد الإعدادات","menu.settings.importSkipped#few":"تم تخطي {count} إعدادات: أسرار أو أنواع غير مناسبة.","menu.settings.importSkipped#many":"تم تخطي {count} إعدادًا: أسرار أو أنواع غير مناسبة.","menu.settings.importSkipped#one":"تم تخطي إعداد واحد: سرّ أو نوع غير مناسب.","menu.settings.importSkipped#other":"تم تخطي {count} إعداد: أسرار أو أنواع غير مناسبة.","menu.settings.importSkipped#two":"تم تخطي إعدادين: أسرار أو أنواع غير مناسبة.","menu.settings.importSkipped#zero":"تم تخطي {count} إعداد: أسرار أو أنواع غير مناسبة.","menu.settings.importTitle":"استيراد الإعدادات","menu.settings.importUnknown#few":"{count} مفاتيح غير معروفة: من إصدار أحدث أو من ميزات محذوفة.","menu.settings.importUnknown#many":"{count} مفتاحًا غير معروف: من إصدار أحدث أو من ميزات محذوفة.","menu.settings.importUnknown#one":"مفتاح واحد غير معروف: من إصدار أحدث أو من ميزة محذوفة.","menu.settings.importUnknown#other":"{count} مفتاح غير معروف: من إصدار أحدث أو من ميزات محذوفة.","menu.settings.importUnknown#two":"مفتاحان غير معروفين: من إصدار أحدث أو من ميزات محذوفة.","menu.settings.importUnknown#zero":"{count} مفتاح غير معروف: من إصدار أحدث أو من ميزات محذوفة.","menu.settings.importUnmatchedAccounts#few":"{count} حسابات من الملف غير موجودة على هذا الجهاز.","menu.settings.importUnmatchedAccounts#many":"{count} حسابًا من الملف غير موجود على هذا الجهاز.","menu.settings.importUnmatchedAccounts#one":"حساب واحد من الملف غير موجود على هذا الجهاز.","menu.settings.importUnmatchedAccounts#other":"{count} حساب من الملف غير موجود على هذا الجهاز.","menu.settings.importUnmatchedAccounts#two":"حسابان من الملف غير موجودين على هذا الجهاز.","menu.settings.importUnmatchedAccounts#zero":"{count} حساب من الملف غير موجود على هذا الجهاز.","menu.settings.language":"لغة Ghostgram","menu.settings.languageFooter":"افتراضيًا، تتبع نصوص Ghostgram لغة Telegram.","menu.settings.languageHeader":"اللغة","menu.settings.reset":"إعادة تعيين كل الإعدادات","menu.settings.resetConfirm":"إعادة تعيين","menu.settings.resetDone":"تمت إعادة تعيين الإعدادات","menu.settings.resetText":"ستعود إعدادات كل الحسابات إلى قيمها الافتراضية. لا يمكن التراجع عن ذلك.","menu.settings.resetTitle":"إعادة تعيين كل إعدادات Ghostgram؟","menu.settings.scopeAccount":"الحساب","menu.settings.telegramLanguage":"لغة Telegram","menu.settings.valueOff":"متوقف","menu.settings.valueOn":"مفعّل","menu.tab.appearance.chatList":"قائمة المحادثات","menu.tab.appearance.chatListInfo":"الصفوف، السحب، الصور الرمزية والمجلدات","menu.tab.appearance.icons":"الأيقونات","menu.tab.appearance.iconsInfo":"حزم الأيقونات والشارة","menu.tab.appearance.messages":"الرسائل","menu.tab.appearance.messagesInfo":"الخط، الفقاعات، علامات الصح والملصقات","menu.tab.appearance.panels":"اللوحات","menu.tab.appearance.panelsInfo":"شريط علامات التبويب، حقل الإدخال وأزرار الوصول السريع","menu.tab.appearance.profileSettings":"الملف الشخصي والإعدادات","menu.tab.appearance.profileSettingsInfo":"المعرّف (ID)، مركز البيانات، التواريخ وعناصر الإعدادات","menu.tab.appearance.themeBackground":"السمة والخلفية","menu.tab.appearance.themeBackgroundInfo":"الأسود الخالص (AMOLED)، الفواصل، تظليل الحواف، خلفية GIF والثلج","menu.tab.media.calls":"المكالمات","menu.tab.media.callsInfo":"التسجيل، الكتم الصامت، الإحصاءات أثناء المكالمة","menu.tab.media.cameraVideoMessages":"رسائل الفيديو والكاميرا","menu.tab.media.cameraVideoMessagesInfo":"الأقنعة، استوديو الأقنعة، العلامة المائية","menu.tab.media.downloads":"التنزيلات والجودة","menu.tab.media.downloadsInfo":"نقل أسرع، جودة الصور، المعرض","menu.tab.media.voice":"الصوت","menu.tab.media.voiceInfo":"مغيّر الصوت، المعادل الصوتي، التحويل إلى نص","menu.tab.messages.antiDelete":"المحذوفة والمعدّلة","menu.tab.messages.antiDeleteInfo":"حفظ الرسائل المحذوفة وسجل التعديلات","menu.tab.messages.export":"تصدير المحادثات","menu.tab.messages.exportInfo":"محادثة أو الحساب بالكامل بتنسيق HTML وJSON","menu.tab.messages.menuGestures":"القائمة والإيماءات","menu.tab.messages.menuGesturesInfo":"عناصر قائمة الرسالة، النقر المزدوج، الإشارات المرجعية","menu.tab.messages.restrictions":"تجاوز القيود","menu.tab.messages.restrictionsInfo":"النسخ ولقطات الشاشة والوسائط ذاتية التدمير","menu.tab.messages.sending":"الإرسال","menu.tab.messages.sendingInfo":"الاستبدال التلقائي، مانع الأحرف الكبيرة، الرد باقتباس","menu.tab.messages.translation":"الترجمة","menu.tab.messages.translationInfo":"الخدمة، زر على الرسائل، الترجمة قبل الإرسال","menu.tab.more.about":"حول التطبيق","menu.tab.more.aboutInfo":"الإصدار، الروابط والرخصة","menu.tab.more.fakeGifts":"الهدايا الوهمية","menu.tab.more.fakeGiftsInfo":"هدايا ونجوم في ملفك الشخصي لا يراها غيرك","menu.tab.more.ghostgramSettings":"إعدادات Ghostgram","menu.tab.more.ghostgramSettingsInfo":"اللغة، التصدير، الاستيراد وإعادة التعيين","menu.tab.more.nickBadge":"شارة الاسم","menu.tab.more.nickBadgeInfo":"شارات GCONNECT بجانب الأسماء","menu.tab.more.vpn":"شبكة VPN بالاشتراك","menu.tab.more.vpnInfo":"اشتراكات VLESS والبروكسي","menu.tab.privacy.anonymousMode":"الوضع المجهول","menu.tab.privacy.anonymousModeInfo":"قناع وصوت مُغيَّر بنقرة واحدة","menu.tab.privacy.ghostExceptions":"الاستثناءات","menu.tab.privacy.ghostExceptionsInfo":"المحادثات والمجلدات وأنواع المحادثات التي يكون فيها وضع الشبح متوقفًا","menu.tab.privacy.sendDelay":"الإرسال المؤجل","menu.tab.privacy.sendDelayInfo":"مهلة قبل إرسال النصوص والوسائط","menu.tab.privacy.spoofing":"الاستبدالات","menu.tab.privacy.spoofingInfo":"رقم الهاتف والملف الشخصي","menu.tab.security.accounts":"الحسابات","menu.tab.security.accountsInfo":"زر الحسابات في «المحادثات»، إعدادات كل حساب","menu.tab.security.chatProtection":"حماية المحادثات","menu.tab.security.chatProtectionInfo":"رموز مرور المحادثات، المجلد السري، لقطات الشاشة","menu.tab.security.passcode":"رمز المرور","menu.tab.security.passcodeInfo":"إضافات إلى رمز المرور المدمج","menu.title":"Ghostgram"}"#,
          // messageMenu
 diff --git a/Ghostgram/GGHooks/Core/GGGiftHooks.swift b/Ghostgram/GGHooks/Core/GGGiftHooks.swift
-index f5c7ca7b..b821872b 100644
+index f5c7ca7b..603f6f2a 100644
 --- a/Ghostgram/GGHooks/Core/GGGiftHooks.swift
 +++ b/Ghostgram/GGHooks/Core/GGGiftHooks.swift
 @@ -1,6 +1,6 @@
@@ -1048,7 +1260,17 @@ index f5c7ca7b..b821872b 100644
  
  import Foundation
  import Postbox
-@@ -27,7 +27,7 @@ public enum GGGiftHooks {
+@@ -19,6 +19,9 @@ public enum GGProfileGiftAction {
+ }
+ 
+ public enum GGGiftHooks {
++    /// Local-only service cards for a private chat. Never inserted in Postbox or an outgoing queue.
++    public static let chatMessages = GGHookPoint<(Account, PeerId) -> [Message]>("gifts.chatMessages")
++
+     /// Transformer of the state a profile's gift list publishes (called on every state push).
+     public static let profileGifts = GGHookPoint<(inout ProfileGiftsContext.State, GGProfileGiftsQuery) -> Void>("gifts.profileGifts")
+ 
+@@ -27,7 +30,7 @@ public enum GGGiftHooks {
      public static let localGiftAction = GGHookPoint<(StarGiftReference, GGProfileGiftAction, GGProfileGiftsQuery) -> Bool>("gifts.localGiftAction")
  
      /// Policy (any `true`): the profile has local-only gifts, so its «Gifts» tab is shown although
@@ -1057,7 +1279,7 @@ index f5c7ca7b..b821872b 100644
      /// data, possibly off the main thread: answer from memory.
      public static let hasLocalGifts = GGHookPoint<(Account, PeerId) -> Bool>("gifts.hasLocalGifts")
  
-@@ -44,7 +44,7 @@ public enum GGGiftHooks {
+@@ -44,7 +47,7 @@ public enum GGGiftHooks {
  
  private let ggProfileGiftsInvalidations = ValuePipe<Void>()
  
@@ -1066,7 +1288,7 @@ index f5c7ca7b..b821872b 100644
  public func ggProfileHasLocalGifts(account: Account, peerId: PeerId) -> Bool {
      if GGGiftHooks.hasLocalGifts.isEmpty {
          return false
-@@ -57,11 +57,11 @@ public func ggProfileHasLocalGifts(account: Account, peerId: PeerId) -> Bool {
+@@ -57,11 +60,11 @@ public func ggProfileHasLocalGifts(account: Account, peerId: PeerId) -> Bool {
      return false
  }
  
@@ -1077,10 +1299,94 @@ index f5c7ca7b..b821872b 100644
 +/// with the last one while the profile is open.
  public func ggRepublishOnLocalGiftsChange<T>(_ signal: Signal<T, NoError>, account: Account, peerId: PeerId) -> Signal<T, NoError> {
 -    if GGGiftHooks.hasLocalGifts.isEmpty || peerId != account.peerId {
-+    if GGGiftHooks.hasLocalGifts.isEmpty {
++    if GGGiftHooks.hasLocalGifts.isEmpty && GGGiftHooks.chatMessages.isEmpty {
          return signal
      }
      let changes: Signal<Void, NoError> = .single(Void()) |> then(ggProfileGiftsInvalidations.signal())
+@@ -71,6 +74,30 @@ public func ggRepublishOnLocalGiftsChange<T>(_ signal: Signal<T, NoError>, accou
+     }
+ }
+ 
++/// Snapshot only. The account owns the store, while peerId selects the displayed recipient.
++public func ggLocalGiftChatMessages(account: Account, peerId: PeerId) -> [Message] {
++    return GGGiftHooks.chatMessages.handlers.flatMap { $0(account, peerId) }
++}
++
++/// Only our render-only namespace, not upstream Local photo/name-change info rows.
++public func ggIsLocalGiftChatMessageId(_ id: MessageId) -> Bool {
++    return id.namespace == GGLocalGiftChatIdentity.namespace && id.id < 0
++}
++
++public func ggIsLocalGiftChatMessage(_ message: Message) -> Bool {
++    guard ggIsLocalGiftChatMessageId(message.id) else {
++        return false
++    }
++    return message.media.contains { media in
++        if let action = media as? TelegramMediaAction,
++           case let .starGiftUnique(_, _, _, _, _, _, _, _, _, _, savedId, _, _, _, _, _, _, _, _, _, _, _) = action.action,
++           let savedId, savedId == Int64(message.id.id) {
++            return true
++        }
++        return false
++    }
++}
++
+ /// GHOST hook target: the pin limit of a profile's gift list (GiftsListView, PeerInfoGiftsPaneNode)
+ /// — `true` = a local-only gift (no server pin slot).
+ public func ggIsLocalProfileGift(_ reference: StarGiftReference?, account: Account) -> Bool {
+diff --git a/Ghostgram/GGHooks/Core/GGLocalGiftChatProjection.swift b/Ghostgram/GGHooks/Core/GGLocalGiftChatProjection.swift
+new file mode 100644
+index 00000000..70f95347
+--- /dev/null
++++ b/Ghostgram/GGHooks/Core/GGLocalGiftChatProjection.swift
+@@ -0,0 +1,47 @@
++// Compiled into TelegramCore. Kept Foundation-only for host regression tests.
++
++/// A negative local gift key has one stable, non-server message identity after every reload.
++public struct GGLocalGiftChatIdentity {
++    // The pinned upstream uses message namespaces 0...10. This namespace exists only in
++    // the rendered projection, never in Postbox. Local (1) already has -1/-2 info rows.
++    public static let namespace: Int32 = 11
++    public let messageNamespace: Int32
++    public let messageId: Int32
++    public let stableId: UInt32
++    public let entryStableId: UInt64
++
++    public init?(localId: Int64) {
++        guard localId < 0, let messageId = Int32(exactly: localId) else {
++            return nil
++        }
++        self.messageId = messageId
++        self.messageNamespace = GGLocalGiftChatIdentity.namespace
++        self.stableId = UInt32(bitPattern: messageId)
++        // ChatHistoryEntry types 2...7 belong to upstream. A separate row type prevents
++        // collisions even if a real message happens to have the same UInt32 stableId.
++        self.entryStableId = UInt64(self.stableId) | (UInt64(8) << 40)
++    }
++}
++
++/// Insert only into the loaded server window. Open ends include gifts beyond server history.
++/// Inclusive timestamps keep a gift beside real messages created during the same second.
++public func ggLocalGiftChatRangeContains(timestamp: Int32, firstTimestamp: Int32?, lastTimestamp: Int32?, hasEarlier: Bool, hasLater: Bool, isLoading: Bool) -> Bool {
++    if isLoading {
++        return false
++    }
++    guard let firstTimestamp, let lastTimestamp else {
++        return !hasEarlier && !hasLater
++    }
++    if hasEarlier && timestamp < firstTimestamp {
++        return false
++    }
++    if hasLater && timestamp > lastTimestamp {
++        return false
++    }
++    return true
++}
++
++/// Synthetic cards are absent from Postbox. Paginating at one uses the real history boundary.
++public func ggLocalGiftChatNavigationAnchor<Index>(visibleIndex: Index, isLocalGift: Bool, serverBoundary: Index?) -> Index? {
++    return isLocalGift ? serverBoundary : visibleIndex
++}
 diff --git a/Ghostgram/GGHooks/UI/PeerInfo/GGPeerInfoHooks.swift b/Ghostgram/GGHooks/UI/PeerInfo/GGPeerInfoHooks.swift
 index 55c93130..bdc6e6b2 100644
 --- a/Ghostgram/GGHooks/UI/PeerInfo/GGPeerInfoHooks.swift
@@ -1629,6 +1935,43 @@ index 00000000..9972ac2c
 +
 +if __name__ == '__main__':
 +    main()
+diff --git a/build-system/tests/test_local_gift_projection.py b/build-system/tests/test_local_gift_projection.py
+new file mode 100644
+index 00000000..4c9c54e0
+--- /dev/null
++++ b/build-system/tests/test_local_gift_projection.py
+@@ -0,0 +1,31 @@
++"""Execute the production Swift projection helpers on the host, without an iOS build."""
++from pathlib import Path
++import shutil
++import subprocess
++import tempfile
++import unittest
++
++
++ROOT = Path(__file__).resolve().parents[2]
++SOURCE = ROOT / 'Ghostgram/GGHooks/Core/GGLocalGiftChatProjection.swift'
++HARNESS = ROOT / 'Ghostgram/Features/ProfileExport/Tests/LocalGiftChatProjection/main.swift'
++
++
++class LocalGiftProjectionTests(unittest.TestCase):
++    def test_identity_and_history_window(self):
++        self.assertTrue(SOURCE.exists(), 'Local gift chat projection is missing')
++        self.assertIsNotNone(shutil.which('swiftc'))
++        with tempfile.TemporaryDirectory(prefix='gg-gift-projection-') as directory:
++            binary = Path(directory) / 'projection-tests'
++            subprocess.run(['swiftc', str(SOURCE), str(HARNESS), '-o', str(binary)], check=True)
++            subprocess.run([str(binary)], check=True)
++            # A fresh process reconstructs identity from a persisted local record key.
++            fixture = Path(directory) / 'record.json'
++            subprocess.run([str(binary), 'write', str(fixture)], check=True)
++            result = subprocess.run([str(binary), 'read', str(fixture)], check=True,
++                                    text=True, capture_output=True)
++            self.assertEqual(result.stdout.strip(), '-42:4294967254:8800387989462')
++
++
++if __name__ == '__main__':
++    unittest.main()
 diff --git a/build-system/tests/test_sideload_build.py b/build-system/tests/test_sideload_build.py
 new file mode 100644
 index 00000000..76c1e334
@@ -1847,6 +2190,20 @@ index d1ff0f65..77049050 100644
      }
  
      private func service(_ account: String) throws -> String {
+diff --git a/submodules/TelegramUI/Components/Chat/ChatHistoryEntry/Sources/ChatHistoryEntry.swift b/submodules/TelegramUI/Components/Chat/ChatHistoryEntry/Sources/ChatHistoryEntry.swift
+index f703e613..14bf5889 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatHistoryEntry/Sources/ChatHistoryEntry.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatHistoryEntry/Sources/ChatHistoryEntry.swift
+@@ -71,6 +71,9 @@ public enum ChatHistoryEntry: Identifiable, Comparable {
+     public var stableId: UInt64 {
+         switch self {
+         case let .MessageEntry(message, _, _, _, _, attributes):
++            if ggIsLocalGiftChatMessage(message), let identity = GGLocalGiftChatIdentity(localId: Int64(message.id.id)) {
++                return identity.entryStableId
++            }
+             if let groupStableId = attributes.groupStableId {
+                 return UInt64(bitPattern: groupStableId) | ((UInt64(2) << 40))
+             }
 diff --git a/submodules/TelegramUI/Components/Gifts/GiftViewScreen/Sources/GiftViewBuyGift.swift b/submodules/TelegramUI/Components/Gifts/GiftViewScreen/Sources/GiftViewBuyGift.swift
 index 91c2a2b6..b2858609 100644
 --- a/submodules/TelegramUI/Components/Gifts/GiftViewScreen/Sources/GiftViewBuyGift.swift
@@ -2097,6 +2454,44 @@ index 57947333..0c5b904e 100644
              guard let gift = self.subject.arguments?.gift, case let .unique(uniqueGift) = gift, let starsContext = self.context.starsContext, let starsState = starsContext.currentState else {
                  return
              }
+diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift
+index efaaf608..28d5efc7 100644
+--- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift
++++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoData.swift
+@@ -1595,23 +1595,28 @@ func peerInfoScreenData(
+             |> mapToSignal { peerView, availablePanes, globalNotificationSettings, encryptionKeyFingerprint, status, hasStories, hasStoryArchive, recommendedBots, accountIsPremium, savedMessagesPeer, hasSavedMessagesChats, hasSavedMessages, hasSavedMessageTags, hasBotPreviewItems, personalChannel, privacySettings, starsRevenueContextAndState, revenueContextAndState, premiumGiftOptions, webAppPermissions, savedMusicState, businessConnectedBotAndWalletBalance -> Signal<PeerInfoScreenData, NoError> in
+                 let (businessConnectedBot, walletBalance) = businessConnectedBotAndWalletBalance
+                 var availablePanes = availablePanes
++                let hasLocalGifts = ggProfileHasLocalGifts(account: context.account, peerId: peerId)
++                if hasLocalGifts, profileGiftsContext != nil, availablePanes == nil {
++                    availablePanes = []
++                }
+                 if isMyProfile {
+                     availablePanes?.insert(.stories, at: 0)
+-                    if availablePanes != nil, profileGiftsContext != nil, let cachedData = peerView.cachedData as? CachedUserData {
+-                        if (cachedData.starGiftsCount ?? 0) > 0 || ggProfileHasLocalGifts(account: context.account, peerId: peerId) { // GHOST: local-only gifts show the tab too (GGGiftHooks.hasLocalGifts)
++                    if availablePanes != nil, profileGiftsContext != nil {
++                        if ((peerView.cachedData as? CachedUserData)?.starGiftsCount ?? 0) > 0 || hasLocalGifts {
+                             availablePanes?.insert(.gifts, at: 1)
+                         }
+                     }
+                     if let hasStoryArchive, hasStoryArchive {
+                         availablePanes?.append(.storyArchive)
+                     }
+-                } else if let hasStories {
++                } else if hasStories != nil || hasLocalGifts {
++                    let hasStories = hasStories ?? false
+                     if hasStories, peerView.peers[peerView.peerId] is TelegramUser, peerView.peerId != context.account.peerId {
+                         availablePanes?.insert(.stories, at: 0)
+                     }
+                     
+-                    if availablePanes != nil, profileGiftsContext != nil, let cachedData = peerView.cachedData as? CachedUserData, peerView.peerId != context.account.peerId {
+-                        if let starGiftsCount = cachedData.starGiftsCount, starGiftsCount > 0 {
++                    if availablePanes != nil, profileGiftsContext != nil, peerView.peerId != context.account.peerId {
++                        if ((peerView.cachedData as? CachedUserData)?.starGiftsCount ?? 0) > 0 || hasLocalGifts {
+                             availablePanes?.insert(.gifts, at: hasStories ? 1 : 0)
+                         }
+                     }
 diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoHeaderNode.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoHeaderNode.swift
 index dec5fdde..25c1744c 100644
 --- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoScreen/Sources/PeerInfoHeaderNode.swift
@@ -2218,3 +2613,245 @@ index d5cbedac..0453d298 100644
          
          let buildConfig = BuildConfig(baseAppBundleId: baseAppBundleId)
          self.buildConfig = buildConfig
+diff --git a/submodules/TelegramUI/Sources/Chat/ChatControllerLoadDisplayNode.swift b/submodules/TelegramUI/Sources/Chat/ChatControllerLoadDisplayNode.swift
+index bb4f5ded..2eecfd5a 100644
+--- a/submodules/TelegramUI/Sources/Chat/ChatControllerLoadDisplayNode.swift
++++ b/submodules/TelegramUI/Sources/Chat/ChatControllerLoadDisplayNode.swift
+@@ -1586,6 +1586,10 @@ extension ChatControllerImpl {
+         }
+         
+         let interfaceInteraction = ChatPanelInterfaceInteraction(setupReplyMessage: { [weak self] messageId, innerSubject, completion in
++            if let messageId, ggIsLocalGiftChatMessageId(messageId) {
++                completion(.immediate, {})
++                return
++            }
+             guard let strongSelf = self, strongSelf.isNodeLoaded else {
+                 return
+             }
+diff --git a/submodules/TelegramUI/Sources/Chat/ChatControllerOpenMessageContextMenu.swift b/submodules/TelegramUI/Sources/Chat/ChatControllerOpenMessageContextMenu.swift
+index 5bf77c1b..9d6520de 100644
+--- a/submodules/TelegramUI/Sources/Chat/ChatControllerOpenMessageContextMenu.swift
++++ b/submodules/TelegramUI/Sources/Chat/ChatControllerOpenMessageContextMenu.swift
+@@ -21,6 +21,8 @@ import ChatPresentationInterfaceState
+ 
+ extension ChatControllerImpl {
+     func openMessageContextMenu(message: EngineMessage, selectAll: Bool, node: ASDisplayNode, frame: CGRect, anyRecognizer: UIGestureRecognizer?, location: CGPoint?) -> Void {
++        // GHOST: local gift cards are edited/deleted through GiftView, never server message actions.
++        guard !ggIsLocalGiftChatMessage(message._asMessage()) else { return }
+         if self.presentationInterfaceState.interfaceState.selectionState != nil {
+             return
+         }
+diff --git a/submodules/TelegramUI/Sources/ChatController.swift b/submodules/TelegramUI/Sources/ChatController.swift
+index 111f1754..671a3219 100644
+--- a/submodules/TelegramUI/Sources/ChatController.swift
++++ b/submodules/TelegramUI/Sources/ChatController.swift
+@@ -1782,17 +1782,22 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
+         }, openPeerMention: { [weak self] name, progress in
+             self?.openPeerMention(name, progress: progress)
+         }, openMessageContextMenu: { [weak self] message, selectAll, node, frame, anyRecognizer, location in
++            // GHOST: a local card has no server message to reply to, forward, pin or delete.
++            // Tap opens the gift's local edit/delete menu instead.
++            guard !ggIsLocalGiftChatMessage(message) else { return }
+             guard let self, self.isNodeLoaded else {
+                 return
+             }
+             self.openMessageContextMenu(message: EngineMessage(message), selectAll: selectAll, node: node, frame: frame, anyRecognizer: anyRecognizer, location: location)
+         }, openMessageReactionContextMenu: { [weak self] message, sourceView, gesture, value in
++            guard !ggIsLocalGiftChatMessage(message) else { return }
+             guard let self else {
+                 return
+             }
+             
+             self.openMessageReactionContextMenu(message: EngineMessage(message), sourceView: sourceView, gesture: gesture, value: value)
+         }, updateMessageReaction: { [weak self] initialMessage, reaction, force, sourceView in
++            guard !ggIsLocalGiftChatMessage(initialMessage) else { return }
+             guard let strongSelf = self else {
+                 return
+             }
+@@ -2316,6 +2321,8 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
+         clickThroughMessage: { [weak self] view, location in
+             self?.chatDisplayNode.dismissInput(view: view, location: location)
+         }, toggleMessagesSelection: { [weak self] ids, value in
++            let ids = ids.filter { !ggIsLocalGiftChatMessageId($0) }
++            guard !ids.isEmpty else { return }
+             guard let strongSelf = self, strongSelf.isNodeLoaded else {
+                 return
+             }
+@@ -3815,6 +3822,7 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
+             })
+         }, openSearch: {
+         }, setupReply: { [weak self] messageId in
++            guard !ggIsLocalGiftChatMessageId(messageId) else { return }
+             self?.interfaceInteraction?.setupReplyMessage(messageId, nil, { _, f in f() })
+         }, canSetupReply: { [weak self] message in
+             if Namespaces.Message.allEphemeral.contains(message.id.namespace) {
+diff --git a/submodules/TelegramUI/Sources/ChatHistoryEntriesForView.swift b/submodules/TelegramUI/Sources/ChatHistoryEntriesForView.swift
+index 5221e58a..1c00ed62 100644
+--- a/submodules/TelegramUI/Sources/ChatHistoryEntriesForView.swift
++++ b/submodules/TelegramUI/Sources/ChatHistoryEntriesForView.swift
+@@ -61,7 +61,8 @@ func chatHistoryEntriesForView(
+     adMessage: Message?,
+     dynamicAdMessages: [Message],
+     isMusicPlaylist: Bool,
+-    pinToTopStableId: EngineMessage.StableId?
++    pinToTopStableId: EngineMessage.StableId?,
++    includeLocalGiftMessages: Bool
+ ) -> ([ChatHistoryEntry], ChatHistoryEntriesForViewState) {
+     var currentState = currentState
+     
+@@ -141,8 +142,29 @@ func chatHistoryEntriesForView(
+         }
+     }
+     
++    // GHOST: project locally stored gifts into the rendered history only. Keep `view` intact:
++    // it remains the sole source of read receipts, history holes and server synchronization.
++    var messageEntries = view.entries
++    if includeLocalGiftMessages, case let .peer(peerId) = location {
++        var messageIds = Set(messageEntries.map { $0.message.id })
++        for message in ggLocalGiftChatMessages(account: context.account, peerId: peerId) {
++            guard ggLocalGiftChatRangeContains(
++                timestamp: message.timestamp,
++                firstTimestamp: view.entries.first?.message.timestamp,
++                lastTimestamp: view.entries.last?.message.timestamp,
++                hasEarlier: view.earlierId != nil || view.holeEarlier,
++                hasLater: view.laterId != nil || view.holeLater,
++                isLoading: view.isLoading
++            ), messageIds.insert(message.id).inserted else {
++                continue
++            }
++            messageEntries.append(MessageHistoryEntry(message: message, isRead: true, location: nil, monthLocation: nil, attributes: MutableMessageHistoryEntryAttributes(authorIsContact: false)))
++        }
++        messageEntries.sort { $0.index < $1.index }
++    }
++
+     var count = 0
+-    loop: for entry in view.entries {
++    loop: for entry in messageEntries {
+         var message = entry.message.withAppliedEphemeralReplacementMessage()
+         var isRead = entry.isRead
+         
+@@ -258,7 +280,7 @@ func chatHistoryEntriesForView(
+         if groupMessages || reverseGroupedMessages {
+             if let messageGroupingKey = message.groupingKey {
+                 let selection: ChatHistoryMessageSelection
+-                if let selectedMessages = selectedMessages {
++                if let selectedMessages = selectedMessages, !ggIsLocalGiftChatMessage(message) {
+                     selection = .selectable(selected: selectedMessages.contains(message.id), num: nil)
+                 } else {
+                     selection = .none
+@@ -312,7 +334,7 @@ func chatHistoryEntriesForView(
+                 }
+             } else {
+                 let selection: ChatHistoryMessageSelection
+-                if let selectedMessages = selectedMessages {
++                if let selectedMessages = selectedMessages, !ggIsLocalGiftChatMessage(message) {
+                     selection = .selectable(selected: selectedMessages.contains(message.id), num: nil)
+                 } else {
+                     selection = .none
+@@ -327,7 +349,7 @@ func chatHistoryEntriesForView(
+             }
+         } else {
+             let selection: ChatHistoryMessageSelection
+-            if let selectedMessages = selectedMessages {
++            if let selectedMessages = selectedMessages, !ggIsLocalGiftChatMessage(message) {
+                 selection = .selectable(selected: selectedMessages.contains(message.id), num: nil)
+             } else {
+                 selection = .none
+@@ -652,7 +674,7 @@ func chatHistoryEntriesForView(
+             } else {
+                 var isEmpty = true
+                 if entries.count <= 3 {
+-                    loop: for entry in view.entries {
++                    loop: for entry in messageEntries {
+                         var isEmptyMedia = false
+                         var isPeerJoined = false
+                         for media in entry.message.media {
+diff --git a/submodules/TelegramUI/Sources/ChatHistoryListNode.swift b/submodules/TelegramUI/Sources/ChatHistoryListNode.swift
+index be1187f6..48be74b5 100644
+--- a/submodules/TelegramUI/Sources/ChatHistoryListNode.swift
++++ b/submodules/TelegramUI/Sources/ChatHistoryListNode.swift
+@@ -2047,6 +2047,21 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
+             stopHistoryViewUpdates = .single(false)
+         }
+         
++        // GHOST: only the regular, unfiltered private history gets local gift service cards.
++        let includeLocalGiftMessages: Bool
++        if case .default = source, case .peer = chatLocation, tag == nil, mode == .bubbles {
++            switch subject {
++            case nil, .message?:
++                includeLocalGiftMessages = true
++            default:
++                includeLocalGiftMessages = false
++            }
++        } else {
++            includeLocalGiftMessages = false
++        }
++        if includeLocalGiftMessages, let peerId = chatLocation.peerId {
++            historyViewUpdate = ggRepublishOnLocalGiftsChange(historyViewUpdate, account: context.account, peerId: peerId)
++        }
+         let historyViewUpdateValue = historyViewUpdate
+         historyViewUpdate = stopHistoryViewUpdates |> mapToSignal { value in
+             if value {
+@@ -2401,7 +2416,8 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
+                     adMessage: allAdMessages.fixed,
+                     dynamicAdMessages: allAdMessages.opportunistic,
+                     isMusicPlaylist: isMusicPlaylist,
+-                    pinToTopStableId: pinToTopStableId
++                    pinToTopStableId: pinToTopStableId,
++                    includeLocalGiftMessages: includeLocalGiftMessages
+                 )
+                 let lastHeaderId = filteredEntries.last.flatMap { listMessageDateHeaderId(timestamp: $0.index.timestamp) } ?? 0
+                 let processedView = ChatHistoryView(originalView: view, filteredEntries: filteredEntries, associatedData: associatedData, lastHeaderId: lastHeaderId, id: id, locationInput: update.2, ignoreMessagesInTimestampRange: update.3, ignoreMessageIds: update.4)
+@@ -3693,6 +3709,15 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
+         })
+         
+         if let loaded = displayedRange.visibleRange, let firstEntry = historyView.filteredEntries.first, let lastEntry = historyView.filteredEntries.last {
++            // GHOST: a local card can share a boundary timestamp but has no Postbox anchor.
++            func isLocalGiftEntry(_ entry: ChatHistoryEntry) -> Bool {
++                if case let .MessageEntry(message, _, _, _, _, _) = entry {
++                    return ggIsLocalGiftChatMessage(message)
++                }
++                return false
++            }
++            let firstNavigationIndex = ggLocalGiftChatNavigationAnchor(visibleIndex: firstEntry.index, isLocalGift: isLocalGiftEntry(firstEntry), serverBoundary: historyView.originalView.entries.first?.index)
++            let lastNavigationIndex = ggLocalGiftChatNavigationAnchor(visibleIndex: lastEntry.index, isLocalGift: isLocalGiftEntry(lastEntry), serverBoundary: historyView.originalView.entries.last?.index)
+             var mathesFirst = false
+             if loaded.firstIndex <= 5 {
+                 var firstHasGroups = false
+@@ -3733,8 +3758,8 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
+                 }
+             }
+             
+-            if mathesFirst && historyView.originalView.laterId != nil {
+-                let locationInput: ChatHistoryLocation = .Navigation(index: .message(lastEntry.index), anchorIndex: .message(lastEntry.index), count: historyMessageCount, highlight: false)
++            if mathesFirst && historyView.originalView.laterId != nil, let lastNavigationIndex {
++                let locationInput: ChatHistoryLocation = .Navigation(index: .message(lastNavigationIndex), anchorIndex: .message(lastNavigationIndex), count: historyMessageCount, highlight: false)
+                 if self.chatHistoryLocationValue?.content != locationInput {
+                     self.chatHistoryLocationValue = ChatHistoryLocationInput(content: locationInput, id: self.takeNextHistoryLocationId())
+                 }
+@@ -3742,8 +3767,8 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
+                 if self.chatHistoryLocationValue == historyView.locationInput {
+                     self.chatHistoryLocationValue = ChatHistoryLocationInput(content: .Navigation(index: .upperBound, anchorIndex: .upperBound, count: historyMessageCount, highlight: false), id: self.takeNextHistoryLocationId())
+                 }
+-            } else if mathesLast {
+-                let locationInput: ChatHistoryLocation = .Navigation(index: .message(firstEntry.index), anchorIndex: .message(firstEntry.index), count: historyMessageCount, highlight: false)
++            } else if mathesLast, let firstNavigationIndex {
++                let locationInput: ChatHistoryLocation = .Navigation(index: .message(firstNavigationIndex), anchorIndex: .message(firstNavigationIndex), count: historyMessageCount, highlight: false)
+                 if historyView.originalView.earlierId != nil {
+                     if self.chatHistoryLocationValue?.content != locationInput {
+                         self.chatHistoryLocationValue = ChatHistoryLocationInput(content: locationInput, id: self.takeNextHistoryLocationId())
+@@ -4658,7 +4683,13 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
+                     strongSelf._initialData.set(.single(ChatHistoryCombinedInitialData(initialData: transition.initialData, buttonKeyboardMessage: transition.keyboardButtonsMessage, cachedData: transition.cachedData, cachedDataMessages: transition.cachedDataMessages, readStateData: transition.readStateData)))
+                 }
+                 strongSelf._cachedPeerDataAndMessages.set(.single((transition.cachedData, transition.cachedDataMessages)))
+-                let isEmpty = transition.historyView.originalView.entries.isEmpty || loadState == .empty(.botInfo)
++                let hasLocalGiftCards = transition.historyView.filteredEntries.contains { entry in
++                    if case let .MessageEntry(message, _, _, _, _, _) = entry {
++                        return ggIsLocalGiftChatMessage(message)
++                    }
++                    return false
++                }
++                let isEmpty = (transition.historyView.originalView.entries.isEmpty && !hasLocalGiftCards) || loadState == .empty(.botInfo)
+                 var hasReachedLimits = false
+                 if case let .customChatContents(customChatContents) = strongSelf.subject, let messageLimit = customChatContents.messageLimit {
+                     hasReachedLimits = transition.historyView.originalView.entries.count >= messageLimit

@@ -11,10 +11,10 @@ index 00000000..618add53
 +    - xcode-27
 diff --git a/.github/workflows/ghostgram-sideload.yml b/.github/workflows/ghostgram-sideload.yml
 new file mode 100644
-index 00000000..21b7ffc6
+index 00000000..cb3c2fcb
 --- /dev/null
 +++ b/.github/workflows/ghostgram-sideload.yml
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,132 @@
 +name: Ghostgram Sideload IPA
 +
 +on:
@@ -42,8 +42,10 @@ index 00000000..21b7ffc6
 +      - uses: actions/checkout@v4
 +        with:
 +          persist-credentials: false
++      - name: Install cache test dependency
++        run: python3 -m pip install cryptography==50.0.2
 +      - name: Build wrapper tests
-+        run: python3 -m unittest discover -s build-system/tests -p 'test_sideload_build.py' -v
++        run: python3 -m unittest discover -s build-system/tests -p 'test_sideload*.py' -v
 +      - name: Localization and whitespace
 +        run: |
 +          python3 Ghostgram/Strings/check.py --strict --allow-unused
@@ -81,8 +83,37 @@ index 00000000..21b7ffc6
 +          xcrun --sdk iphoneos --show-sdk-version
 +          df -h .
 +          sysctl hw.memsize
++      - name: Prepare encrypted cache tools
++        id: cache-tools
++        if: inputs.mode == 'package'
++        continue-on-error: true
++        env:
++          TG_API_HASH: ${{ secrets.TG_API_HASH }}
++        run: |
++          python3 -m pip install --target "$RUNNER_TEMP/ghostgram-cache-tools" cryptography==50.0.2
++          export PYTHONPATH="$RUNNER_TEMP/ghostgram-cache-tools"
++          scope="$(python3 build-system/sideload_cache.py scope)"
++          echo "scope=$scope" >> "$GITHUB_OUTPUT"
++      - name: Download encrypted Bazel cache
++        id: cache-download
++        if: inputs.mode == 'package' && steps.cache-tools.outcome == 'success'
++        continue-on-error: true
++        uses: actions/cache/restore@v5
++        with:
++          path: ${{ runner.temp }}/ghostgram-sealed-cache
++          key: gg-bazel-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('versions.json', '.gitmodules') }}-${{ steps.cache-tools.outputs.scope }}-${{ github.run_id }}-${{ github.run_attempt }}
++          restore-keys: |
++            gg-bazel-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('versions.json', '.gitmodules') }}-${{ steps.cache-tools.outputs.scope }}-
++      - name: Authenticate and unpack build cache
++        if: inputs.mode == 'package' && steps.cache-tools.outcome == 'success'
++        continue-on-error: true
++        env:
++          TG_API_HASH: ${{ secrets.TG_API_HASH }}
++          PYTHONPATH: ${{ runner.temp }}/ghostgram-cache-tools
++        run: python3 build-system/sideload_cache.py restore --root "$RUNNER_TEMP/ghostgram-bazel-cache" --archive "$RUNNER_TEMP/ghostgram-sealed-cache/cache.bin"
 +      - name: Build full arm64 app without Apple signing credentials
 +        env:
++          GG_BAZEL_CACHE_ROOT: ${{ inputs.mode == 'package' && format('{0}/ghostgram-bazel-cache', runner.temp) || '' }}
 +          BUILD_MODE: ${{ inputs.mode }}
 +          BUILD_NUMBER: ${{ github.run_number }}
 +          TG_API_ID: ${{ secrets.TG_API_ID }}
@@ -101,6 +132,21 @@ index 00000000..21b7ffc6
 +          if-no-files-found: error
 +          retention-days: 3
 +          compression-level: 0
++      - name: Trim and encrypt build cache
++        id: seal-cache
++        if: ${{ !cancelled() && inputs.mode == 'package' && steps.cache-tools.outcome == 'success' }}
++        continue-on-error: true
++        env:
++          TG_API_HASH: ${{ secrets.TG_API_HASH }}
++          PYTHONPATH: ${{ runner.temp }}/ghostgram-cache-tools
++        run: python3 build-system/sideload_cache.py seal --root "$RUNNER_TEMP/ghostgram-bazel-cache" --archive "$RUNNER_TEMP/ghostgram-sealed-cache/cache.bin"
++      - name: Save encrypted cache for the next build
++        if: ${{ !cancelled() && steps.seal-cache.outcome == 'success' }}
++        continue-on-error: true
++        uses: actions/cache/save@v5
++        with:
++          path: ${{ runner.temp }}/ghostgram-sealed-cache
++          key: ${{ steps.cache-download.outputs.cache-primary-key }}
 diff --git a/Ghostgram/Features/ProfileExport/GiftViewHooks/GGGiftViewHooks.swift b/Ghostgram/Features/ProfileExport/GiftViewHooks/GGGiftViewHooks.swift
 index b7f4184f..b45c1efe 100644
 --- a/Ghostgram/Features/ProfileExport/GiftViewHooks/GGGiftViewHooks.swift
@@ -1284,10 +1330,10 @@ index 00000000..9197e418
 +                 actions = actions,
 diff --git a/build-system/sideload_build.py b/build-system/sideload_build.py
 new file mode 100644
-index 00000000..7e9e64c3
+index 00000000..73c97afc
 --- /dev/null
 +++ b/build-system/sideload_build.py
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,174 @@
 +#!/usr/bin/env python3
 +"""Full device build for later Sideloadly signing; never imports Apple credentials."""
 +import argparse
@@ -1421,6 +1467,11 @@ index 00000000..7e9e64c3
 +            '--define=GG_SIDELOAD=1', '--@build_bazel_rules_swift//swift:copt=-DGG_SIDELOAD',
 +            '--jobs=2', '--local_resources=memory=4096',
 +        ])
++        cache_root = os.environ.get('GG_BAZEL_CACHE_ROOT')
++        if cache_root:
++            cache_root = Path(cache_root).expanduser().resolve()
++            command.add_cache_dir(str(cache_root / 'disk'))
++            command.common_build_args.append('--repository_cache=' + str(cache_root / 'repository'))
 +        # Avoid dSYM output on the small hosted runner; always build the full application.
 +        command.configuration_args = [a for a in command.configuration_args
 +                                      if a not in ('--apple_generate_dsym', '--output_groups=+dsyms')]
@@ -1457,6 +1508,127 @@ index 00000000..7e9e64c3
 +
 +if __name__ == '__main__':
 +    sys.exit(main())
+diff --git a/build-system/sideload_cache.py b/build-system/sideload_cache.py
+new file mode 100644
+index 00000000..9972ac2c
+--- /dev/null
++++ b/build-system/sideload_cache.py
+@@ -0,0 +1,115 @@
++"""Bounded, authenticated encrypted Bazel cache for a public GitHub repository."""
++import argparse
++import hashlib
++import os
++from pathlib import Path
++import tarfile
++import tempfile
++
++from cryptography.hazmat.primitives import hashes
++from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
++from cryptography.hazmat.primitives.kdf.hkdf import HKDF
++
++MAGIC = b'GGBCACHE1'
++CHUNK = 1024 * 1024
++
++
++def key(secret, salt):
++    if len(secret) != 32 or any(c not in '0123456789abcdefABCDEF' for c in secret):
++        raise ValueError('A valid TG_API_HASH is required for cache encryption')
++    return HKDF(algorithm=hashes.SHA256(), length=32, salt=salt,
++                info=b'ghostgram-bazel-cache-v1').derive(bytes.fromhex(secret))
++
++
++def trim(root, budget=4 * 1024 ** 3):
++    files = [(p, p.stat()) for p in root.rglob('*') if p.is_file() and not p.is_symlink()]
++    size = sum(s.st_size for _, s in files)
++    for path, stat in sorted(files, key=lambda item: item[1].st_mtime):
++        if size <= budget:
++            break
++        path.unlink()
++        size -= stat.st_size
++
++
++def seal(root, output, secret):
++    trim(root)
++    output.parent.mkdir(parents=True, exist_ok=True)
++    salt, nonce = os.urandom(16), os.urandom(12)
++    header = MAGIC + salt + nonce
++    encryptor = Cipher(algorithms.AES(key(secret, salt)), modes.GCM(nonce)).encryptor()
++    encryptor.authenticate_additional_data(header)
++    # Compress before encryption; the plaintext temporary archive is never cached.
++    with tempfile.TemporaryFile() as plain:
++        with tarfile.open(fileobj=plain, mode='w:gz', compresslevel=1) as archive:
++            def safe_member(member):
++                return member if member.isfile() or member.isdir() else None
++            archive.add(root, arcname='.', filter=safe_member)
++        plain.seek(0)
++        with output.open('wb') as target:
++            target.write(header)
++            while chunk := plain.read(CHUNK):
++                target.write(encryptor.update(chunk))
++            target.write(encryptor.finalize())
++            target.write(encryptor.tag)
++
++
++def extract(archive, root):
++    root.mkdir(parents=True, exist_ok=True)
++    with tarfile.open(archive, 'r:gz') as source:
++        source.extractall(root, filter='data')
++
++
++def restore(archive, root, secret):
++    length = archive.stat().st_size
++    header_size = len(MAGIC) + 28
++    if length < header_size + 16:
++        raise ValueError('Truncated cache')
++    with archive.open('rb') as source, tempfile.NamedTemporaryFile(delete=False) as plain:
++        temporary = Path(plain.name)
++        try:
++            header = source.read(header_size)
++            if not header.startswith(MAGIC):
++                raise ValueError('Unknown cache format')
++            salt, nonce = header[len(MAGIC):len(MAGIC)+16], header[-12:]
++            source.seek(-16, 2)
++            decryptor = Cipher(algorithms.AES(key(secret, salt)), modes.GCM(nonce, source.read(16))).decryptor()
++            decryptor.authenticate_additional_data(header)
++            source.seek(header_size)
++            remaining = length - header_size - 16
++            while remaining:
++                chunk = source.read(min(CHUNK, remaining))
++                if not chunk:
++                    raise ValueError('Truncated cache')
++                plain.write(decryptor.update(chunk))
++                remaining -= len(chunk)
++            plain.write(decryptor.finalize())
++            plain.close()
++            # GCM authenticates the entire archive before any cache entries are installed.
++            extract(temporary, root)
++        finally:
++            plain.close()
++            temporary.unlink(missing_ok=True)
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument('operation', choices=['scope', 'seal', 'restore'])
++    parser.add_argument('--root', type=Path)
++    parser.add_argument('--archive', type=Path)
++    args = parser.parse_args()
++    secret = os.environ.get('TG_API_HASH', '')
++    key(secret, b'validation-only')
++    if args.operation == 'scope':
++        # Isolate caches when application credentials are rotated; never print a key.
++        print(hashlib.sha256(bytes.fromhex(secret)).hexdigest()[:24])
++    elif args.operation == 'seal':
++        seal(args.root, args.archive, secret)
++    elif args.archive.exists():
++        restore(args.archive, args.root, secret)
++        print('Authenticated build cache restored')
++    else:
++        print('No previous build cache; running a cold build')
++
++
++if __name__ == '__main__':
++    main()
 diff --git a/build-system/tests/test_sideload_build.py b/build-system/tests/test_sideload_build.py
 new file mode 100644
 index 00000000..76c1e334
@@ -1543,15 +1715,83 @@ index 00000000..76c1e334
 +
 +if __name__ == '__main__':
 +    unittest.main()
+diff --git a/build-system/tests/test_sideload_cache.py b/build-system/tests/test_sideload_cache.py
+new file mode 100644
+index 00000000..e6a602c1
+--- /dev/null
++++ b/build-system/tests/test_sideload_cache.py
+@@ -0,0 +1,56 @@
++import importlib.util
++from pathlib import Path
++import tempfile
++import unittest
++
++SPEC = importlib.util.spec_from_file_location('sideload_cache', Path(__file__).parents[1] / 'sideload_cache.py')
++cache = importlib.util.module_from_spec(SPEC)
++SPEC.loader.exec_module(cache)
++
++
++class CacheTests(unittest.TestCase):
++    def test_encrypted_round_trip_and_tampering(self):
++        with tempfile.TemporaryDirectory() as folder:
++            base = Path(folder)
++            source = base / 'source'
++            (source / 'disk').mkdir(parents=True)
++            private_data = b'private-build-configuration' * 100
++            (source / 'disk/blob').write_bytes(private_data)
++            archive = base / 'cache.bin'
++            cache.seal(source, archive, 'a' * 32)
++            self.assertNotIn(private_data, archive.read_bytes())
++            cache.restore(archive, base / 'restored', 'a' * 32)
++            self.assertEqual((base / 'restored/disk/blob').read_bytes(), private_data)
++            with self.assertRaises(Exception):
++                cache.restore(archive, base / 'wrong-key', 'b' * 32)
++            self.assertFalse((base / 'wrong-key/disk/blob').exists())
++            changed = bytearray(archive.read_bytes())
++            changed[len(changed) // 2] ^= 1
++            archive.write_bytes(changed)
++            with self.assertRaises(Exception):
++                cache.restore(archive, base / 'tampered', 'a' * 32)
++            self.assertFalse((base / 'tampered/disk/blob').exists())
++
++    def test_trim_keeps_newest_files_within_budget(self):
++        import os
++        with tempfile.TemporaryDirectory() as folder:
++            root = Path(folder)
++            (root / 'old').write_bytes(b'x' * 8)
++            (root / 'new').write_bytes(b'y' * 8)
++            os.utime(root / 'old', (1, 1))
++            cache.trim(root, 8)
++            self.assertFalse((root / 'old').exists())
++            self.assertTrue((root / 'new').exists())
++
++    def test_rejects_unsafe_archive(self):
++        import io
++        import tarfile
++        with tempfile.TemporaryDirectory() as folder:
++            root = Path(folder)
++            with tarfile.open(root / 'unsafe.tar', 'w:gz') as tar:
++                member = tarfile.TarInfo('../escape')
++                member.size = 1
++                tar.addfile(member, io.BytesIO(b'x'))
++            with self.assertRaises(tarfile.FilterError):
++                cache.extract(root / 'unsafe.tar', root / 'destination')
++            self.assertFalse((root / 'escape').exists())
 diff --git a/docs/SIDELOAD-CLOUD.md b/docs/SIDELOAD-CLOUD.md
 new file mode 100644
-index 00000000..305aed6b
+index 00000000..ddd2ba96
 --- /dev/null
 +++ b/docs/SIDELOAD-CLOUD.md
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,35 @@
 +# Ghostgram с Windows: облачная сборка
 +
 +Workflow **Ghostgram Sideload IPA** запускается вручную во вкладке Actions.
++
++## Кэш повторных сборок
++
++В режиме `package` сохраняются загрузки зависимостей и результаты Bazel. Кэш ограничен 4 ГиБ и сохраняется после сборки; первый запуск заполняет его, последующие используют подходящие результаты. Смена версии Xcode/Bazel или API-параметров создаёт отдельный кэш. Реальное ускорение зависит от объёма изменений и попаданий в кэш; его сбой не блокирует получение IPA.
++
++Репозиторий публичный, поэтому архив кэша шифруется AES-256-GCM ключом, производным от `TG_API_HASH`, до загрузки в GitHub Cache. Проверка подлинности выполняется до распаковки. Открытые временные файлы, конфигурация из Secrets и весь рабочий каталог runner в кэш не загружаются. Дополнительные секреты не нужны. Как и сам IPA, расшифрованные результаты компиляции могут содержать встроенные API-параметры.
 +
 +## Первый запуск
 +

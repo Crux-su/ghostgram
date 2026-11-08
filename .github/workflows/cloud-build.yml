@@ -38,8 +38,10 @@ jobs:
           subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
           subprocess.run(['git', 'apply', str(patch)], check=True)
           PY
+      - name: Install cache test dependency
+        run: python3 -m pip install cryptography==50.0.2
       - name: Build wrapper tests
-        run: python3 -m unittest discover -s build-system/tests -p 'test_sideload_build.py' -v
+        run: python3 -m unittest discover -s build-system/tests -p 'test_sideload*.py' -v
       - name: Localization and whitespace
         run: |
           python3 Ghostgram/Strings/check.py --strict --allow-unused
@@ -90,8 +92,37 @@ jobs:
           xcrun --sdk iphoneos --show-sdk-version
           df -h .
           sysctl hw.memsize
+      - name: Prepare encrypted cache tools
+        id: cache-tools
+        if: inputs.mode == 'package'
+        continue-on-error: true
+        env:
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+        run: |
+          python3 -m pip install --target "$RUNNER_TEMP/ghostgram-cache-tools" cryptography==50.0.2
+          export PYTHONPATH="$RUNNER_TEMP/ghostgram-cache-tools"
+          scope="$(python3 build-system/sideload_cache.py scope)"
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+      - name: Download encrypted Bazel cache
+        id: cache-download
+        if: inputs.mode == 'package' && steps.cache-tools.outcome == 'success'
+        continue-on-error: true
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/ghostgram-sealed-cache
+          key: gg-bazel-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('versions.json', '.gitmodules') }}-${{ steps.cache-tools.outputs.scope }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            gg-bazel-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('versions.json', '.gitmodules') }}-${{ steps.cache-tools.outputs.scope }}-
+      - name: Authenticate and unpack build cache
+        if: inputs.mode == 'package' && steps.cache-tools.outcome == 'success'
+        continue-on-error: true
+        env:
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          PYTHONPATH: ${{ runner.temp }}/ghostgram-cache-tools
+        run: python3 build-system/sideload_cache.py restore --root "$RUNNER_TEMP/ghostgram-bazel-cache" --archive "$RUNNER_TEMP/ghostgram-sealed-cache/cache.bin"
       - name: Build full arm64 app without Apple signing credentials
         env:
+          GG_BAZEL_CACHE_ROOT: ${{ inputs.mode == 'package' && format('{0}/ghostgram-bazel-cache', runner.temp) || '' }}
           BUILD_MODE: ${{ inputs.mode }}
           BUILD_NUMBER: ${{ github.run_number }}
           TG_API_ID: ${{ secrets.TG_API_ID }}
@@ -110,3 +141,18 @@ jobs:
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
+      - name: Trim and encrypt build cache
+        id: seal-cache
+        if: ${{ !cancelled() && inputs.mode == 'package' && steps.cache-tools.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          PYTHONPATH: ${{ runner.temp }}/ghostgram-cache-tools
+        run: python3 build-system/sideload_cache.py seal --root "$RUNNER_TEMP/ghostgram-bazel-cache" --archive "$RUNNER_TEMP/ghostgram-sealed-cache/cache.bin"
+      - name: Save encrypted cache for the next build
+        if: ${{ !cancelled() && steps.seal-cache.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/ghostgram-sealed-cache
+          key: ${{ steps.cache-download.outputs.cache-primary-key }}

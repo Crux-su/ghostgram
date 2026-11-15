@@ -92,6 +92,8 @@ jobs:
           xcrun --sdk iphoneos --show-sdk-version
           df -h .
           sysctl hw.memsize
+      - name: Local purchase regression tests
+        run: python3 -m unittest discover -s build-system/tests -p 'test_local*.py' -v
       - name: Prepare encrypted cache tools
         id: cache-tools
         if: inputs.mode == 'package'
@@ -124,7 +126,7 @@ jobs:
         env:
           GG_BAZEL_CACHE_ROOT: ${{ inputs.mode == 'package' && format('{0}/ghostgram-bazel-cache', runner.temp) || '' }}
           BUILD_MODE: ${{ inputs.mode }}
-          BUILD_NUMBER: ${{ github.run_number }}
+          BUILD_NUMBER: '7'
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
         run: |

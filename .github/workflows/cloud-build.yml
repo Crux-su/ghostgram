@@ -126,7 +126,7 @@ jobs:
         env:
           GG_BAZEL_CACHE_ROOT: ${{ inputs.mode == 'package' && format('{0}/ghostgram-bazel-cache', runner.temp) || '' }}
           BUILD_MODE: ${{ inputs.mode }}
-          BUILD_NUMBER: '7'
+          BUILD_NUMBER: '8'
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
         run: |

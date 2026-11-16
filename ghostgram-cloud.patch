@@ -1220,12 +1220,13 @@ index 3b038062..4bf73110 100644
  
 diff --git a/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGLocalStarsPack.swift b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGLocalStarsPack.swift
 new file mode 100644
-index 00000000..718a9f5b
+index 00000000..032e5397
 --- /dev/null
 +++ b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGLocalStarsPack.swift
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,133 @@
 +import Foundation
 +import UIKit
++import SwiftSignalKit
 +import Display
 +import AlertUI
 +import Postbox

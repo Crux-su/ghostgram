@@ -432,7 +432,7 @@ index 5fa1e96c..d615d79f 100644
          let senderLabel: String
          if record.nameHidden {
 diff --git a/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsStore.swift b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsStore.swift
-index 03abfc86..865f4a77 100644
+index 03abfc86..aa5f273e 100644
 --- a/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsStore.swift
 +++ b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsStore.swift
 @@ -4,7 +4,7 @@ import Postbox
@@ -498,7 +498,7 @@ index 03abfc86..865f4a77 100644
  }
  
  final class GGFakeGiftsStore {
-@@ -60,6 +81,11 @@ final class GGFakeGiftsStore {
+@@ -60,7 +81,13 @@ final class GGFakeGiftsStore {
          var records: [GGFakeGiftRecord]?
          var nextLocalId: Int64 = -1
          var refreshStarted = false
@@ -508,19 +508,22 @@ index 03abfc86..865f4a77 100644
 +        var history: [GGFakeGiftRecord] = []
 +        var deliveryGeneration: Int = 0
          let resolveDisposable = MetaDisposable()
++        let appearanceDisposable = MetaDisposable()
  
          init(id: AccountRecordId, peerId: PeerId, basePath: String, postbox: Postbox) {
-@@ -78,6 +104,9 @@ final class GGFakeGiftsStore {
+             self.id = id
+@@ -78,6 +105,10 @@ final class GGFakeGiftsStore {
      /// What the profile shows, per account peer. Read on the main thread on every gift list push.
      private var resolved: [PeerId: [ProfileGiftsContext.State.StarGift]] = [:]
      private var recordSnapshots: [PeerId: [GGFakeGiftRecord]] = [:]
 +    private var resolvedChatMessages: [PeerId: [Message]] = [:]
 +    private var ledgerSnapshots: [PeerId: GGLocalPurchaseLedger] = [:]
++    private var accountIds: [PeerId: GGAccountID] = [:]
 +    private var transactionSnapshots: [PeerId: [StarsContext.State.Transaction]] = [:]
  
      private let changesPipe = ValuePipe<PeerId>()
  
-@@ -86,9 +115,13 @@ final class GGFakeGiftsStore {
+@@ -86,9 +117,13 @@ final class GGFakeGiftsStore {
  
      // MARK: - Reading (any thread)
  
@@ -536,7 +539,7 @@ index 03abfc86..865f4a77 100644
          }
      }
  
-@@ -98,6 +131,12 @@ final class GGFakeGiftsStore {
+@@ -98,6 +133,12 @@ final class GGFakeGiftsStore {
          }
      }
  
@@ -549,7 +552,7 @@ index 03abfc86..865f4a77 100644
      /// Current records first, then every change of this account's list.
      func recordsSignal(accountPeerId: PeerId) -> Signal<[GGFakeGiftRecord], NoError> {
          return .single(self.records(accountPeerId: accountPeerId))
-@@ -108,14 +147,147 @@ final class GGFakeGiftsStore {
+@@ -108,14 +149,176 @@ final class GGFakeGiftsStore {
          })
      }
  
@@ -569,7 +572,21 @@ index 03abfc86..865f4a77 100644
 +    }
 +
 +    func starsTransactions(accountPeerId: PeerId) -> [StarsContext.State.Transaction] {
-+        return self.lock.withLock { self.transactionSnapshots[accountPeerId] ?? [] }
++        return self.transactions(accountPeerId: accountPeerId, currency: .stars)
++    }
++
++    func gramTransactions(accountPeerId: PeerId) -> [StarsContext.State.Transaction] {
++        return self.transactions(accountPeerId: accountPeerId, currency: .ton)
++    }
++
++    private func transactions(accountPeerId: PeerId, currency: CurrencyAmount.Currency) -> [StarsContext.State.Transaction] {
++        return self.lock.withLock { (self.transactionSnapshots[accountPeerId] ?? []).filter { $0.count.currency == currency } }
++    }
++
++    func gramBalance(accountPeerId: PeerId) -> Int64? {
++        guard let accountId = self.lock.withLock({ self.accountIds[accountPeerId] }),
++              let seed = GGLocalProfile.state.value(for: accountId).gramSeed else { return nil }
++        return self.lock.withLock { (self.ledgerSnapshots[accountPeerId] ?? GGLocalPurchaseLedger()).gramBalance(seed: seed) }
 +    }
 +
 +    func hasPremium(accountPeerId: PeerId, peerId: PeerId) -> Bool {
@@ -598,11 +615,26 @@ index 03abfc86..865f4a77 100644
 +                Queue.mainQueue().async { completion(false) }; return
 +            }
 +            if entry.records == nil { self.readFile(entry) }
-+            guard !entry.readFailed, price.currency == .stars, price.amount.nanos == 0, entry.nextLocalId > Int64(Int32.min) else {
++            guard !entry.readFailed, price.amount.nanos == 0, entry.nextLocalId > Int64(Int32.min) else {
 +                Queue.mainQueue().async { completion(false) }; return
 +            }
 +            if entry.ledger.completed[requestId] != nil {
 +                Queue.mainQueue().async { completion(true) }; return
++            }
++            let currency: GGLocalPurchaseCurrency
++            let gramSeed: GGLocalGramSeed?
++            switch price.currency {
++            case .stars:
++                currency = .stars
++                gramSeed = nil
++            case .ton:
++                // GRAM uses nanograms in CurrencyAmount.value, not whole GRAM or Stars.
++                guard premiumMonths == nil, let gift, case .unique = gift,
++                      let seed = GGLocalProfile.state.value(for: entry.id.gg).gramSeed else {
++                    Queue.mainQueue().async { completion(false) }; return
++                }
++                currency = .gram
++                gramSeed = seed
 +            }
 +            let localId = entry.nextLocalId
 +            let now = Int32(Date().timeIntervalSince1970)
@@ -618,8 +650,8 @@ index 03abfc86..865f4a77 100644
 +            do {
 +                let premium = premiumMonths.map { (recipient: String(recipient.toInt64()), months: $0, now: Int64(now)) }
 +                let debit = GGLocalStarsDebit(localId: localId, recipient: recipient.toInt64(), date: now, amount: price.amount.value,
-+                    giftData: try gift.map { try JSONEncoder().encode($0) }, premiumMonths: premiumMonths)
-+                let ledger = try entry.ledger.commit(requestId: requestId, localId: localId, cost: price.amount.value, fallbackBalance: fallbackBalance, premium: premium, debit: debit, persist: { candidate in
++                    giftData: try gift.map { try JSONEncoder().encode($0) }, premiumMonths: premiumMonths, currency: currency)
++                let ledger = try entry.ledger.commit(requestId: requestId, localId: localId, cost: price.amount.value, fallbackBalance: fallbackBalance, premium: premium, debit: debit, currency: currency, gramSeed: gramSeed, persist: { candidate in
 +                    guard self.writeFile(entry, records: records, ledger: candidate, services: services, nextLocalId: localId - 1) else { throw CocoaError(.fileWriteUnknown) }
 +                })
 +                entry.ledger = ledger
@@ -699,8 +731,14 @@ index 03abfc86..865f4a77 100644
      // MARK: - Accounts
  
      /// `GGAccountHooks.accountWillStart` (the thread that creates the account).
-@@ -126,9 +298,7 @@ final class GGFakeGiftsStore {
+@@ -124,11 +327,13 @@ final class GGFakeGiftsStore {
+             return
+         }
          let entry = AccountEntry(id: start.id, peerId: start.peerId, basePath: start.basePath, postbox: start.postbox)
++        self.lock.withLock { self.accountIds[start.peerId] = start.id.gg }
++        entry.appearanceDisposable.set(GGLocalProfile.state.signal(for: start.id.gg).start(next: { _ in
++            GGStarsHooks.invalidate()
++        }))
          self.queue.async {
              self.entries[start.peerId] = entry
 -            if GGFakeGiftsSettings.isEnabled.value {
@@ -710,17 +748,23 @@ index 03abfc86..865f4a77 100644
          }
      }
  
-@@ -142,6 +312,9 @@ final class GGFakeGiftsStore {
+@@ -138,10 +343,15 @@ final class GGFakeGiftsStore {
+                 return
+             }
+             entry.resolveDisposable.dispose()
++            entry.appearanceDisposable.dispose()
+             self.entries.removeValue(forKey: peerId)
              self.lock.withLock {
                  self.resolved.removeValue(forKey: peerId)
                  self.recordSnapshots.removeValue(forKey: peerId)
 +                self.resolvedChatMessages.removeValue(forKey: peerId)
 +                self.ledgerSnapshots.removeValue(forKey: peerId)
++                self.accountIds.removeValue(forKey: peerId)
 +                self.transactionSnapshots.removeValue(forKey: peerId)
              }
          }
      }
-@@ -163,6 +336,7 @@ final class GGFakeGiftsStore {
+@@ -163,6 +373,7 @@ final class GGFakeGiftsStore {
                  self.lock.withLock {
                      self.resolved.removeAll()
                      self.recordSnapshots.removeAll()
@@ -728,7 +772,7 @@ index 03abfc86..865f4a77 100644
                  }
                  for peerId in peerIds {
                      self.changesPipe.putNext(peerId)
-@@ -177,7 +351,7 @@ final class GGFakeGiftsStore {
+@@ -177,7 +388,7 @@ final class GGFakeGiftsStore {
      // MARK: - Changes
  
      /// Adds a copy of a gift to the account's profile. `completion` on the main thread.
@@ -737,7 +781,7 @@ index 03abfc86..865f4a77 100644
          self.queue.async {
              guard let entry = self.entries[accountPeerId] else {
                  Queue.mainQueue().async {
-@@ -188,14 +362,22 @@ final class GGFakeGiftsStore {
+@@ -188,14 +399,22 @@ final class GGFakeGiftsStore {
              if entry.records == nil {
                  self.readFile(entry)
              }
@@ -763,7 +807,7 @@ index 03abfc86..865f4a77 100644
              }
          }
      }
-@@ -247,15 +429,13 @@ final class GGFakeGiftsStore {
+@@ -247,15 +466,13 @@ final class GGFakeGiftsStore {
          }
      }
  
@@ -781,7 +825,7 @@ index 03abfc86..865f4a77 100644
          }
      }
  
-@@ -322,10 +502,49 @@ final class GGFakeGiftsStore {
+@@ -322,10 +539,49 @@ final class GGFakeGiftsStore {
  
      private func readFile(_ entry: AccountEntry) {
          var records: [GGFakeGiftRecord] = []
@@ -834,7 +878,7 @@ index 03abfc86..865f4a77 100644
          entry.records = records
          // Gifts moved from the old client by the migration.
          let accountId = entry.id.gg
-@@ -335,7 +554,11 @@ final class GGFakeGiftsStore {
+@@ -335,7 +591,11 @@ final class GGFakeGiftsStore {
              if !imported.isEmpty {
                  entry.records = imported + records
                  entry.nextLocalId = min(entry.nextLocalId, (imported.map { $0.localId }.min() ?? 0) - 1)
@@ -847,7 +891,7 @@ index 03abfc86..865f4a77 100644
              }
              Queue.mainQueue().async {
                  GGFakeGiftsSettings.legacyImport.reset(for: accountId)
-@@ -343,35 +566,58 @@ final class GGFakeGiftsStore {
+@@ -343,35 +603,58 @@ final class GGFakeGiftsStore {
          }
      }
  
@@ -917,7 +961,7 @@ index 03abfc86..865f4a77 100644
                  if let peer = transaction.getPeer(peerId) {
                      peers[peerId] = EnginePeer(peer)
                  }
-@@ -379,19 +625,59 @@ final class GGFakeGiftsStore {
+@@ -379,19 +662,59 @@ final class GGFakeGiftsStore {
              return peers
          }
          |> deliverOn(self.queue)).start(next: { [weak self, weak entry] peers in
@@ -963,7 +1007,7 @@ index 03abfc86..865f4a77 100644
 +        var flags: StarsContext.State.Transaction.Flags = []
 +        if let gift, case .unique = gift { flags.insert(.isStarGiftResale) }
 +        return StarsContext.State.Transaction(flags: flags, id: "ghostgram-local-\(debit.localId)",
-+            count: CurrencyAmount(amount: StarsAmount(value: -debit.amount, nanos: 0), currency: .stars),
++            count: CurrencyAmount(amount: StarsAmount(value: -debit.amount, nanos: 0), currency: debit.purchaseCurrency == .gram ? .ton : .stars),
 +            date: debit.date, peer: peers[PeerId(debit.recipient)].map { .peer($0) } ?? .unsupported,
 +            title: nil, description: nil, photo: nil, transactionDate: nil, transactionUrl: nil,
 +            paidMessageId: nil, giveawayMessageId: nil, media: [], subscriptionPeriod: nil,
@@ -981,7 +1025,7 @@ index 03abfc86..865f4a77 100644
          }
          self.changesPipe.putNext(peerId)
          Queue.mainQueue().async {
-@@ -399,27 +685,94 @@ final class GGFakeGiftsStore {
+@@ -399,27 +722,94 @@ final class GGFakeGiftsStore {
          }
      }
  
@@ -1079,7 +1123,7 @@ index 03abfc86..865f4a77 100644
                  attributes: attributes,
                  availability: uniqueGift.availability,
                  giftAddress: nil,
-@@ -439,8 +792,8 @@ final class GGFakeGiftsStore {
+@@ -439,8 +829,8 @@ final class GGFakeGiftsStore {
          }
          return ProfileGiftsContext.State.StarGift(
              gift: gift,
@@ -1092,10 +1136,10 @@ index 03abfc86..865f4a77 100644
              entities: record.entities,
 diff --git a/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGLocalPurchaseLedger.swift b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGLocalPurchaseLedger.swift
 new file mode 100644
-index 00000000..46193d31
+index 00000000..4779cdb2
 --- /dev/null
 +++ b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGLocalPurchaseLedger.swift
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,87 @@
 +import Foundation
 +
 +enum GGLocalPurchaseError: Error {
@@ -1103,7 +1147,24 @@ index 00000000..46193d31
 +    case invalidAmount
 +}
 +
-+/// Immutable receipt. Keep it even when the corresponding local gift is deleted or transferred.
++enum GGLocalPurchaseCurrency: String, Codable {
++    case stars
++    case gram
++}
++
++/// The profile amount is a seed. A new revision explicitly resets spending, even for the same amount.
++struct GGLocalGramSeed: Codable, Equatable {
++    var nanograms: Int64
++    var revision: String?
++}
++
++struct GGLocalGramWallet: Codable, Equatable {
++    var seed: GGLocalGramSeed
++    var nanograms: Int64
++}
++
++/// Immutable receipt. Amount is whole Stars or nanograms according to purchaseCurrency.
++/// Keep the existing Codable fields when reading ledgers written before GRAM support.
 +struct GGLocalStarsDebit: Codable, Equatable {
 +    var localId: Int64
 +    var recipient: Int64
@@ -1111,6 +1172,9 @@ index 00000000..46193d31
 +    var amount: Int64
 +    var giftData: Data? = nil
 +    var premiumMonths: Int32? = nil
++    var currency: GGLocalPurchaseCurrency? = nil
++
++    var purchaseCurrency: GGLocalPurchaseCurrency { self.currency ?? .stars }
 +}
 +
 +/// Embedded in the gift file. The caller persists this candidate and its gift in one atomic write.
@@ -1120,17 +1184,35 @@ index 00000000..46193d31
 +    var premiumUntil: [String: Int64] = [:]
 +    // Optional so version-2 files made before transaction history remain readable.
 +    var debits: [GGLocalStarsDebit]? = nil
++    var gram: GGLocalGramWallet? = nil
 +
-+    func commit(requestId: String, localId: Int64, cost: Int64, fallbackBalance: Int64, premium: (recipient: String, months: Int32, now: Int64)?, debit: GGLocalStarsDebit? = nil, persist: (GGLocalPurchaseLedger) throws -> Void) throws -> GGLocalPurchaseLedger {
++    func gramBalance(seed: GGLocalGramSeed) -> Int64 {
++        if let gram = self.gram, gram.seed == seed { return max(0, gram.nanograms) }
++        return max(0, seed.nanograms)
++    }
++
++    func commit(requestId: String, localId: Int64, cost: Int64, fallbackBalance: Int64, premium: (recipient: String, months: Int32, now: Int64)?, debit: GGLocalStarsDebit? = nil, currency: GGLocalPurchaseCurrency = .stars, gramSeed: GGLocalGramSeed? = nil, persist: (GGLocalPurchaseLedger) throws -> Void) throws -> GGLocalPurchaseLedger {
 +        if self.completed[requestId] != nil { return self }
 +        guard cost >= 0, localId < 0 else { throw GGLocalPurchaseError.invalidAmount }
-+        let available = self.balance ?? max(0, fallbackBalance)
++        let available: Int64
++        switch currency {
++        case .stars:
++            available = self.balance ?? max(0, fallbackBalance)
++        case .gram:
++            guard let gramSeed, gramSeed.nanograms >= 0, premium == nil else { throw GGLocalPurchaseError.invalidAmount }
++            available = self.gramBalance(seed: gramSeed)
++        }
 +        guard available >= cost else { throw GGLocalPurchaseError.insufficientFunds }
 +        var next = self
-+        next.balance = available - cost
++        switch currency {
++        case .stars: next.balance = available - cost
++        case .gram:
++            guard let gramSeed else { throw GGLocalPurchaseError.invalidAmount }
++            next.gram = GGLocalGramWallet(seed: gramSeed, nanograms: available - cost)
++        }
 +        next.completed[requestId] = localId
 +        if let debit {
-+            guard debit.localId == localId, debit.amount == cost else { throw GGLocalPurchaseError.invalidAmount }
++            guard debit.localId == localId, debit.amount == cost, debit.purchaseCurrency == currency else { throw GGLocalPurchaseError.invalidAmount }
 +            next.debits = (next.debits ?? []) + [debit]
 +        }
 +        if let premium {
@@ -1438,11 +1520,26 @@ index 00000000..5da48886
 +}
 diff --git a/Ghostgram/Features/ProfileExport/Sources/FakeGifts/LOCAL_PURCHASE_VERIFICATION.md b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/LOCAL_PURCHASE_VERIFICATION.md
 new file mode 100644
-index 00000000..1a757dd2
+index 00000000..cffe3cf5
 --- /dev/null
 +++ b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/LOCAL_PURCHASE_VERIFICATION.md
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,90 @@
 +# Native local purchase verification
++
++GRAM follow-up, 2026-11-16 (device/frame verification pending):
++
++- A configured local profile GRAM amount now seeds a separate per-account nanogram balance.
++  Gift overlays, wallet/profile balance and GRAM transaction screens use that same balance.
++  A local 12.25 GRAM purchase from 200 must leave 187.75, without changing Stars.
++- GRAM purchases use the captured local route and atomically persist the gift, debit and
++  remaining balance. All/Outgoing GRAM history must show one -12.25 GRAM row with the gift,
++  date and recipient, survive restart and keep its receipt after deleting/transferring the gift.
++  Incoming history stays unchanged. No real payment/transfer RPC may run in this local route.
++- Re-entering a valid profile GRAM amount explicitly resets the displayed balance, even when
++  entering the same number. Changing other appearance fields must not reset spending.
++- Regression harness covers fractional spending, separate currencies, restart, retry,
++  insufficient funds, failed persistence, old ledger decoding and explicit balance reset.
++  Host command: python3 -m unittest discover -s build-system/tests -p test_local_purchases.py -v.
 +
 +Windows changes, 2026-11-16 (full iOS build and frame verification pending):
 +
@@ -1540,10 +1637,10 @@ index b23eaa2b..6b212f73 100644
          GGChatExportMenu.register()
 diff --git a/Ghostgram/Features/ProfileExport/Sources/LocalProfile/GGLocalProfile.swift b/Ghostgram/Features/ProfileExport/Sources/LocalProfile/GGLocalProfile.swift
 new file mode 100644
-index 00000000..e67e77c5
+index 00000000..ee88b9c9
 --- /dev/null
 +++ b/Ghostgram/Features/ProfileExport/Sources/LocalProfile/GGLocalProfile.swift
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,132 @@
 +import Foundation
 +import UIKit
 +import SwiftSignalKit
@@ -1562,7 +1659,13 @@ index 00000000..e67e77c5
 +    var premiumBadge: Bool = false
 +    var rating: Int? = nil
 +    var gram: Int64? = nil
++    var gramRevision: String? = nil
 +    var color: Int = 0
++
++    var gramSeed: GGLocalGramSeed? {
++        guard self.enabled, let nanograms = ggGramDisplayNanograms(self.gram) else { return nil }
++        return GGLocalGramSeed(nanograms: nanograms, revision: self.gramRevision)
++    }
 +
 +    var nameColor: UIColor? {
 +        switch color {
@@ -1593,10 +1696,16 @@ index 00000000..e67e77c5
 +                state.set(value, for: account)
 +            }
 +        }
++        GGStarsHooks.displayedTonBalance.register { accountPeerId, _ in
++            return GGFakeGiftsStore.shared.gramBalance(accountPeerId: accountPeerId).map { StarsAmount(value: $0, nanos: 0) }
++        }
++        GGStarsHooks.localTonTransactions.register { accountPeerId in
++            return GGFakeGiftsStore.shared.gramTransactions(accountPeerId: accountPeerId)
++        }
 +        GGWalletDisplayHooks.balance.register { context in
-+            return state.signal(for: context.account.id.gg)
-+            |> map { value in
-+                return value.enabled ? ggGramDisplayNanograms(value.gram) : nil
++            return combineLatest(state.signal(for: context.account.id.gg), GGFakeGiftsStore.shared.recordsSignal(accountPeerId: context.account.peerId))
++            |> map { _, _ in
++                return GGFakeGiftsStore.shared.gramBalance(accountPeerId: context.account.peerId)
 +            }
 +            |> distinctUntilChanged
 +        }
@@ -1666,10 +1775,10 @@ index 00000000..e67e77c5
 +}
 diff --git a/Ghostgram/Features/ProfileExport/Sources/LocalProfile/GGLocalProfileScreen.swift b/Ghostgram/Features/ProfileExport/Sources/LocalProfile/GGLocalProfileScreen.swift
 new file mode 100644
-index 00000000..54b04985
+index 00000000..e2a2a259
 --- /dev/null
 +++ b/Ghostgram/Features/ProfileExport/Sources/LocalProfile/GGLocalProfileScreen.swift
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,78 @@
 +import Foundation
 +import Display
 +import SwiftSignalKit
@@ -1715,9 +1824,10 @@ index 00000000..54b04985
 +                            if text.isEmpty { state.rating = nil }
 +                            else if let number = GGLocalProfile.unsigned(text), number <= 1000 { state.rating = Int(number) } else { valid = false }
 +                        case "gram":
-+                            if text.isEmpty { state.gram = nil }
++                            if text.isEmpty { state.gram = nil; state.gramRevision = UUID().uuidString }
 +                            else if let number = ggParseWholeGram(text) {
 +                                state.gram = number
++                                state.gramRevision = UUID().uuidString
 +                                state.enabled = true
 +                            } else { valid = false }
 +                        default: break
@@ -1803,10 +1913,10 @@ index 00000000..273d5cab
 +}
 diff --git a/Ghostgram/Features/ProfileExport/Tests/LocalPurchases/main.swift b/Ghostgram/Features/ProfileExport/Tests/LocalPurchases/main.swift
 new file mode 100644
-index 00000000..8dd9eac7
+index 00000000..2eee817e
 --- /dev/null
 +++ b/Ghostgram/Features/ProfileExport/Tests/LocalPurchases/main.swift
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,103 @@
 +import Foundation
 +func require(_ value: @autoclosure () -> Bool, _ message: String) { precondition(value(), message) }
 +let url = URL(fileURLWithPath: CommandLine.arguments[2])
@@ -1837,6 +1947,40 @@ index 00000000..8dd9eac7
 +    } catch GGLocalPurchaseError.invalidAmount { }
 +    let anotherAccount = GGLocalPurchaseLedger()
 +    require(anotherAccount.balance == nil && anotherAccount.completed.isEmpty && anotherAccount.debits == nil, "Account state stays isolated")
++
++    let seed = GGLocalGramSeed(nanograms: 200_000_000_000, revision: nil)
++    let gramReceipt = GGLocalStarsDebit(localId: -2, recipient: 42, date: 1_800_000_001,
++        amount: 12_250_000_000, giftData: Data([4, 5, 6]), currency: .gram)
++    let gramPurchase = try first.commit(requestId: "gram-gift", localId: -2, cost: gramReceipt.amount,
++        fallbackBalance: 0, premium: nil, debit: gramReceipt, currency: .gram, gramSeed: seed) { candidate in
++        require(candidate.gramBalance(seed: seed) == 187_750_000_000 && candidate.balance == 25,
++            "A 12.25 GRAM gift deducts exactly from 200 GRAM, without charging Stars")
++        require(candidate.debits?.last == gramReceipt, "GRAM receipt is persisted with the balance and gift")
++        try JSONEncoder().encode(candidate).write(to: url.appendingPathExtension("gram"), options: .atomic)
++    }
++    do {
++        _ = try gramPurchase.commit(requestId: "gram-insufficient", localId: -3, cost: 187_750_000_001,
++            fallbackBalance: Int64.max, premium: nil, currency: .gram, gramSeed: seed) { _ in
++            fatalError("GRAM cannot spend Stars or a different fallback balance")
++        }
++        fatalError("Expected insufficient GRAM")
++    } catch GGLocalPurchaseError.insufficientFunds { }
++    do {
++        _ = try gramPurchase.commit(requestId: "gram-write-failed", localId: -3, cost: 1,
++            fallbackBalance: 0, premium: nil, currency: .gram, gramSeed: seed) { _ in
++            throw CocoaError(.fileWriteNoPermission)
++        }
++        fatalError("Expected GRAM persistence failure")
++    } catch { }
++    require(gramPurchase.gramBalance(seed: seed) == 187_750_000_000 && gramPurchase.completed["gram-write-failed"] == nil,
++        "Failed GRAM persistence cannot alter the balance or deduplication")
++    do {
++        _ = try first.commit(requestId: "gram-wrong-currency", localId: -3, cost: 75,
++            fallbackBalance: 0, premium: nil, debit: receipt, currency: .gram, gramSeed: seed) { _ in
++            fatalError("GRAM cannot produce a Stars history row")
++        }
++        fatalError("Expected receipt currency mismatch")
++    } catch GGLocalPurchaseError.invalidAmount { }
 +} else {
 +    let ledger = try JSONDecoder().decode(GGLocalPurchaseLedger.self, from: Data(contentsOf: url))
 +    let same = try ledger.commit(requestId: "gift-1", localId: -2, cost: 75, fallbackBalance: 999, premium: nil) { _ in fatalError("Retry must not write or debit") }
@@ -1846,6 +1990,22 @@ index 00000000..8dd9eac7
 +    let legacy = try JSONDecoder().decode(GGLocalPurchaseLedger.self,
 +        from: Data(#"{"balance":100,"completed":{},"premiumUntil":{}}"#.utf8))
 +    require(legacy.balance == 100 && legacy.debits == nil, "Pre-history files remain readable")
++    require(legacy.gram == nil, "Existing ledgers remain readable without a GRAM wallet")
++    let seed = GGLocalGramSeed(nanograms: 200_000_000_000, revision: nil)
++    let gramLedger = try JSONDecoder().decode(GGLocalPurchaseLedger.self, from: Data(contentsOf: url.appendingPathExtension("gram")))
++    let gramRetry = try gramLedger.commit(requestId: "gram-gift", localId: -3, cost: 12_250_000_000,
++        fallbackBalance: 0, premium: nil, currency: .gram, gramSeed: seed) { _ in fatalError("GRAM retry must not write") }
++    require(gramRetry == gramLedger && gramRetry.gramBalance(seed: seed) == 187_750_000_000,
++        "Restart and retry keep one GRAM debit and the fractional remainder")
++    require(gramRetry.debits?.filter { $0.purchaseCurrency == .gram }.map { $0.amount } == [12_250_000_000],
++        "Exactly one GRAM receipt survives restart")
++    require(gramRetry.debits?.filter { $0.purchaseCurrency == .stars }.map { $0.amount } == [75],
++        "GRAM and Stars history stay in their own currencies")
++    let resetSeed = GGLocalGramSeed(nanograms: 200_000_000_000, revision: "user-reentered-200")
++    require(gramRetry.gramBalance(seed: resetSeed) == 200_000_000_000,
++        "Re-entering the same profile amount explicitly resets the displayed GRAM balance")
++    require(GGLocalPurchaseLedger().gramBalance(seed: seed) == 200_000_000_000,
++        "A different account starts from its own configured balance")
 +    let now: Int64 = 1_800_000_000
 +    let premium = try same.commit(requestId: "premium-1", localId: -2, cost: 20, fallbackBalance: 0, premium: ("recipient", 3, now),
 +        debit: GGLocalStarsDebit(localId: -2, recipient: 43, date: Int32(now), amount: 20, premiumMonths: 3)) { _ in }
@@ -2372,10 +2532,14 @@ index 00000000..ea48fec0
 +    return GGLocalGiftPurchaseHooks.premiumBadge.handlers.contains { $0(accountPeerId, peerId) }
 +}
 diff --git a/Ghostgram/GGHooks/Core/GGStarsHooks.swift b/Ghostgram/GGHooks/Core/GGStarsHooks.swift
-index 3bb22c57..8f178481 100644
+index 3bb22c57..11f4f6b1 100644
 --- a/Ghostgram/GGHooks/Core/GGStarsHooks.swift
 +++ b/Ghostgram/GGHooks/Core/GGStarsHooks.swift
-@@ -4,13 +4,15 @@
+@@ -1,16 +1,20 @@
+ // Compiled into TelegramCore (filegroup //Ghostgram/GGHooks:TelegramCoreHookSources).
+ // The account's Stars balance as features show it («Локальные звёзды»: a number shown on this
+-// device only). TON balances are never touched.
++// device only). GRAM projections affect display contexts, never WalletContext or server data.
  
  import Foundation
  import SwiftSignalKit
@@ -2389,23 +2553,28 @@ index 3bb22c57..8f178481 100644
 -    public static let displayedBalance = GGHookPoint<(StarsAmount) -> StarsAmount?>("stars.displayedBalance")
 +    public static let displayedBalance = GGHookPoint<(PeerId, StarsAmount) -> StarsAmount?>("stars.displayedBalance")
 +    public static let localTransactions = GGHookPoint<(PeerId) -> [StarsContext.State.Transaction]>("stars.localTransactions")
++    public static let displayedTonBalance = GGHookPoint<(PeerId, StarsAmount) -> StarsAmount?>("stars.displayedTonBalance")
++    public static let localTonTransactions = GGHookPoint<(PeerId) -> [StarsContext.State.Transaction]>("stars.localTonTransactions")
  
      /// Every live Stars balance publishes its state again through `displayedBalance` — call after
      /// the shown balance changed. Any thread.
-@@ -23,25 +25,38 @@ private let ggStarsBalanceInvalidations = ValuePipe<Void>()
+@@ -22,26 +26,40 @@ public enum GGStarsHooks {
+ private let ggStarsBalanceInvalidations = ValuePipe<Void>()
  
  /// GHOST hook target: `StarsContextImpl` (publish) and `StarsContext.currentState` — the state as
- /// features show it. A TON state passes as it is.
+-/// features show it. A TON state passes as it is.
 -func ggDisplayedStarsState(_ state: StarsContext.State, ton: Bool) -> StarsContext.State {
 -    if ton || GGStarsHooks.displayedBalance.isEmpty {
-+func ggDisplayedStarsState(_ state: StarsContext.State, ton: Bool, accountPeerId: PeerId) -> StarsContext.State {
-+    if ton {
-         return state
-     }
-+    var state = state
-     for handler in GGStarsHooks.displayedBalance.handlers {
+-        return state
+-    }
+-    for handler in GGStarsHooks.displayedBalance.handlers {
 -        if let balance = handler(state.balance) {
 -            var state = state
++/// features show it. The underlying real state stays unchanged.
++func ggDisplayedStarsState(_ state: StarsContext.State, ton: Bool, accountPeerId: PeerId) -> StarsContext.State {
++    var state = state
++    let handlers = ton ? GGStarsHooks.displayedTonBalance.handlers : GGStarsHooks.displayedBalance.handlers
++    for handler in handlers {
 +        if let balance = handler(accountPeerId, state.balance) {
              state.balance = balance
 -            return state
@@ -2418,8 +2587,8 @@ index 3bb22c57..8f178481 100644
  
 +/// Projection only: upstream keeps its real transactions and pagination cursor.
 +func ggDisplayedStarsTransactions(_ transactions: [StarsContext.State.Transaction], ton: Bool, accountPeerId: PeerId) -> [StarsContext.State.Transaction] {
-+    guard !ton else { return transactions }
-+    let local = GGStarsHooks.localTransactions.handlers.flatMap { $0(accountPeerId) }
++    let handlers = ton ? GGStarsHooks.localTonTransactions.handlers : GGStarsHooks.localTransactions.handlers
++    let local = handlers.flatMap { $0(accountPeerId) }
 +    let server = transactions.filter { !$0.id.hasPrefix("ghostgram-local-") }
 +    guard !local.isEmpty else { return server }
 +    var ids = Set<String>()
@@ -2429,11 +2598,15 @@ index 3bb22c57..8f178481 100644
 +}
 +
  /// GHOST hook target: `StarsContextImpl.init`. `republish` runs on the main queue after
- /// `GGStarsHooks.invalidate()`. Nil — nothing subscribed — for TON and while no feature changes
+-/// `GGStarsHooks.invalidate()`. Nil — nothing subscribed — for TON and while no feature changes
++/// `GGStarsHooks.invalidate()`. Nil — nothing subscribed — while no feature changes
  /// the shown balance.
  func ggObserveStarsBalanceInvalidation(ton: Bool, _ republish: @escaping () -> Void) -> Disposable? {
 -    if ton || GGStarsHooks.displayedBalance.isEmpty {
-+    if ton || (GGStarsHooks.displayedBalance.isEmpty && GGStarsHooks.localTransactions.isEmpty) {
++    let hasHandlers = ton
++        ? (!GGStarsHooks.displayedTonBalance.isEmpty || !GGStarsHooks.localTonTransactions.isEmpty)
++        : (!GGStarsHooks.displayedBalance.isEmpty || !GGStarsHooks.localTransactions.isEmpty)
++    if !hasHandlers {
          return nil
      }
      return ggStarsBalanceInvalidations.signal().start(next: { _ in
@@ -2529,7 +2702,7 @@ index f4dbc005..befd0caf 100644
      /// Policy: `true` hides one of Telegram's own rows («Скрыть в настройках»). Asked for every row
 diff --git a/Ghostgram/GGHooks/UI/Settings/GGWalletDisplayHooks.swift b/Ghostgram/GGHooks/UI/Settings/GGWalletDisplayHooks.swift
 new file mode 100644
-index 00000000..e37bbcb8
+index 00000000..6c12acac
 --- /dev/null
 +++ b/Ghostgram/GGHooks/UI/Settings/GGWalletDisplayHooks.swift
 @@ -0,0 +1,12 @@
@@ -2537,7 +2710,7 @@ index 00000000..e37bbcb8
 +import AccountContext
 +import GGCore
 +
-+/// Appearance only. Never used by WalletContext, transfers or transaction records.
++/// Local balance projection for profile, wallet and gift overlays. Never changes WalletContext.
 +public enum GGWalletDisplayHooks {
 +    public static let balance = GGHookPoint<(AccountContext) -> Signal<Int64?, NoError>>("wallet.displayBalance")
 +
@@ -4526,6 +4699,58 @@ index 4c622ec6..ece5ec2c 100644
          self.controllerNode.refreshHasPersonalChannelsIfNeeded()
          self.controllerNode.initialExpandPanes = false
          
+diff --git a/submodules/TelegramUI/Components/Stars/StarsBalanceOverlayComponent/BUILD b/submodules/TelegramUI/Components/Stars/StarsBalanceOverlayComponent/BUILD
+index d3e5547d..0e91df5b 100644
+--- a/submodules/TelegramUI/Components/Stars/StarsBalanceOverlayComponent/BUILD
++++ b/submodules/TelegramUI/Components/Stars/StarsBalanceOverlayComponent/BUILD
+@@ -10,6 +10,7 @@ swift_library(
+         "-warnings-as-errors",
+     ],
+     deps = [
++        "//Ghostgram/GGHooks:GGHooks",
+         "//submodules/AsyncDisplayKit",
+         "//submodules/Display",
+         "//submodules/TelegramCore",
+diff --git a/submodules/TelegramUI/Components/Stars/StarsBalanceOverlayComponent/Sources/StarsBalanceOverlayComponent.swift b/submodules/TelegramUI/Components/Stars/StarsBalanceOverlayComponent/Sources/StarsBalanceOverlayComponent.swift
+index bc8f9043..9062c173 100644
+--- a/submodules/TelegramUI/Components/Stars/StarsBalanceOverlayComponent/Sources/StarsBalanceOverlayComponent.swift
++++ b/submodules/TelegramUI/Components/Stars/StarsBalanceOverlayComponent/Sources/StarsBalanceOverlayComponent.swift
+@@ -12,6 +12,7 @@ import MultilineTextWithEntitiesComponent
+ import TextFormat
+ import Markdown
+ import TelegramStringFormatting
++import GGHooks
+ 
+ public final class StarsBalanceOverlayComponent: Component {
+     private let context: AccountContext
+@@ -96,21 +97,20 @@ public final class StarsBalanceOverlayComponent: Component {
+             
+             if self.balanceDisposable == nil {
+                 if component.peerId == component.context.account.peerId {
+-                    if let starsContext = component.context.starsContext, let tonContext = component.context.tonContext {
+-                        self.balanceDisposable = combineLatest(queue: Queue.mainQueue(),
+-                            starsContext.state,
+-                            tonContext.state
+-                        ).start(next: { [weak self] starsState, tonState in
++                    self.balanceDisposable = combineLatest(queue: Queue.mainQueue(),
++                            component.context.starsContext?.state ?? .single(nil),
++                            component.context.tonContext?.state ?? .single(nil),
++                            GGWalletDisplayHooks.balanceSignal(context: component.context)
++                        ).start(next: { [weak self] starsState, tonState, localGramBalance in
+                             guard let self else {
+                                 return
+                             }
+                             self.starsBalance = starsState?.balance.value ?? 0
+-                            self.tonBalance = tonState?.balance.value ?? 0
++                            self.tonBalance = localGramBalance ?? tonState?.balance.value ?? 0
+                             if !self.isUpdating {
+                                 self.state?.updated()
+                             }
+                         })
+-                    }
+                 } else {
+                     let starsRevenueStatsContext = StarsRevenueStatsContext(account: component.context.account, peerId: component.peerId, ton: false)
+                     self.starsRevenueStatsContext = starsRevenueStatsContext
 diff --git a/submodules/TelegramUI/Components/Wallet/WalletScreen/BUILD b/submodules/TelegramUI/Components/Wallet/WalletScreen/BUILD
 index 49086140..cd83f13d 100644
 --- a/submodules/TelegramUI/Components/Wallet/WalletScreen/BUILD

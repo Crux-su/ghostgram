@@ -1,7 +1,7 @@
 {
   "base": "2a6b08272b7da893f88986846022bafd0727df89",
-  "sha256": "8aec917278c5f354c84888cf4d176b645ef03c2cc68dcc60ba783ebb36248a31",
+  "sha256": "22134b8c87428982d498c4e688cc6c40d3af4c95c2a97f01b76d304f706274ac",
   "patch": "ghostgram-cloud.patch",
   "sourceCommit": "3f476f4be873ea1fecb22570cbfecb5f3d4876e2",
-  "buildNumber": 7
+  "buildNumber": 8
 }

@@ -3081,15 +3081,16 @@ index 00000000..29445385
 +    sys.exit(main())
 diff --git a/build-system/sideload_cache.py b/build-system/sideload_cache.py
 new file mode 100644
-index 00000000..9972ac2c
+index 00000000..8bddf24c
 --- /dev/null
 +++ b/build-system/sideload_cache.py
-@@ -0,0 +1,115 @@
+@@ -0,0 +1,132 @@
 +"""Bounded, authenticated encrypted Bazel cache for a public GitHub repository."""
 +import argparse
 +import hashlib
 +import os
 +from pathlib import Path
++import shutil
 +import tarfile
 +import tempfile
 +
@@ -3108,7 +3109,21 @@ index 00000000..9972ac2c
 +                info=b'ghostgram-bazel-cache-v1').derive(bytes.fromhex(secret))
 +
 +
++def discard_repository_contents(root):
++    # Bazel 9 puts unpacked repository trees here. Individual-file eviction (and
++    # excluding links from the archive) makes these trees incomplete while their
++    # cache markers still look valid. Keep only atomic CAS/download objects.
++    contents = root / 'repository' / 'contents'
++    if not contents.parent.resolve().is_relative_to(root.resolve()):
++        raise ValueError('Repository contents path escapes the cache root')
++    if contents.is_symlink():
++        contents.unlink()
++    elif contents.exists():
++        shutil.rmtree(contents)
++
++
 +def trim(root, budget=4 * 1024 ** 3):
++    discard_repository_contents(root)
 +    files = [(p, p.stat()) for p in root.rglob('*') if p.is_file() and not p.is_symlink()]
 +    size = sum(s.st_size for _, s in files)
 +    for path, stat in sorted(files, key=lambda item: item[1].st_mtime):
@@ -3173,6 +3188,8 @@ index 00000000..9972ac2c
 +            plain.close()
 +            # GCM authenticates the entire archive before any cache entries are installed.
 +            extract(temporary, root)
++            # Older authenticated caches may already contain partially evicted repos.
++            discard_repository_contents(root)
 +        finally:
 +            plain.close()
 +            temporary.unlink(missing_ok=True)
@@ -3365,10 +3382,10 @@ index 00000000..9f85aadb
 +    unittest.main()
 diff --git a/build-system/tests/test_sideload_cache.py b/build-system/tests/test_sideload_cache.py
 new file mode 100644
-index 00000000..e6a602c1
+index 00000000..f409ca24
 --- /dev/null
 +++ b/build-system/tests/test_sideload_cache.py
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,103 @@
 +import importlib.util
 +from pathlib import Path
 +import tempfile
@@ -3380,6 +3397,53 @@ index 00000000..e6a602c1
 +
 +
 +class CacheTests(unittest.TestCase):
++    def test_trim_keeps_atomic_blobs_instead_of_partial_repository_trees(self):
++        import os
++        with tempfile.TemporaryDirectory() as folder:
++            root = Path(folder)
++            binary = root / 'disk/cas/object'
++            download = root / 'repository/content_addressable/sha256/archive/file'
++            build_file = root / 'repository/contents/repo/BUILD.bazel'
++            for path in [binary, download, build_file]:
++                path.parent.mkdir(parents=True, exist_ok=True)
++                path.write_bytes(b'x' * 8)
++            os.utime(binary, (1, 1))
++            os.utime(download, (2, 2))
++            os.utime(build_file, (3, 3))
++            cache.trim(root, 16)
++            self.assertTrue(binary.exists(), 'Discarding an extracted repo must preserve compiled cache objects')
++            self.assertTrue(download.exists(), 'Downloaded content-addressed archives remain reusable')
++            self.assertFalse((root / 'repository/contents').exists())
++
++    def test_restore_discards_legacy_incomplete_repository_contents(self):
++        import io
++        import tarfile
++        with tempfile.TemporaryDirectory() as folder:
++            root = Path(folder)
++            payload = io.BytesIO()
++            with tarfile.open(fileobj=payload, mode='w:gz') as archive:
++                for name, data in [
++                    ('disk/cas/object', b'compiled-object'),
++                    ('repository/content_addressable/sha256/archive/file', b'verified-download'),
++                    ('repository/contents/repo/lib/shell.bzl', b'partial-repo-without-BUILD'),
++                ]:
++                    member = tarfile.TarInfo(name)
++                    member.size = len(data)
++                    archive.addfile(member, io.BytesIO(data))
++            # A valid v1 encrypted fixture made by the old implementation, with a partial repo.
++            salt, nonce = b's' * 16, b'n' * 12
++            header = cache.MAGIC + salt + nonce
++            encryptor = cache.Cipher(cache.algorithms.AES(cache.key('a' * 32, salt)), cache.modes.GCM(nonce)).encryptor()
++            encryptor.authenticate_additional_data(header)
++            encrypted = encryptor.update(payload.getvalue()) + encryptor.finalize()
++            artifact = root / 'legacy.bin'
++            artifact.write_bytes(header + encrypted + encryptor.tag)
++            destination = root / 'restored'
++            cache.restore(artifact, destination, 'a' * 32)
++            self.assertFalse((destination / 'repository/contents').exists(), 'Bazel must refetch incomplete repository trees')
++            self.assertEqual((destination / 'disk/cas/object').read_bytes(), b'compiled-object')
++            self.assertEqual((destination / 'repository/content_addressable/sha256/archive/file').read_bytes(), b'verified-download')
++
 +    def test_encrypted_round_trip_and_tampering(self):
 +        with tempfile.TemporaryDirectory() as folder:
 +            base = Path(folder)

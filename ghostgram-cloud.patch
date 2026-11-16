@@ -216,7 +216,7 @@ index b7f4184f..889e33f0 100644
 +    }
 +}
 diff --git a/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsHooks.swift b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsHooks.swift
-index 2512a061..6d6c5f0f 100644
+index 2512a061..926931a5 100644
 --- a/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsHooks.swift
 +++ b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGFakeGiftsHooks.swift
 @@ -10,8 +10,9 @@ import ContextUI
@@ -358,7 +358,7 @@ index 2512a061..6d6c5f0f 100644
 +                        guard success else { return }
 +                        let chat = context.sharedContext.makeChatController(context: context, chatLocation: .peer(id: peer.id), subject: nil, botStart: nil, mode: .standard(.default), params: nil)
 +                        navigationController.pushViewController(chat)
-+                        Queue.mainQueue().after(0.35) { [weak navigationController] in
++                        Queue.mainQueue().after(0.35) { [weak navigationController = navigationController] in
 +                            guard let navigationController else { return }
 +                            navigationController.view.addSubview(ConfettiView(frame: navigationController.view.bounds))
 +                        }
@@ -1220,7 +1220,7 @@ index 3b038062..4bf73110 100644
  
 diff --git a/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGLocalStarsPack.swift b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGLocalStarsPack.swift
 new file mode 100644
-index 00000000..459cdd3a
+index 00000000..718a9f5b
 --- /dev/null
 +++ b/Ghostgram/Features/ProfileExport/Sources/FakeGifts/GGLocalStarsPack.swift
 @@ -0,0 +1,132 @@
@@ -1341,7 +1341,7 @@ index 00000000..459cdd3a
 +                        navigation.pushViewController(chat)
 +                        // Wait until the persisted service card is due and navigation has settled.
 +                        let context = info.context
-+                        Queue.mainQueue().after(Double(delaySeconds) + (delaySeconds == 0 ? 0.35 : 1.0)) { [weak navigation] in
++                        Queue.mainQueue().after(Double(delaySeconds) + (delaySeconds == 0 ? 0.35 : 1.0)) { [weak navigation = navigation] in
 +                            let _ = (combineLatest(context.sharedContext.applicationBindings.applicationInForeground, context.sharedContext.activeAccountContexts)
 +                            |> filter { foreground, _ in foreground }
 +                            |> take(1) |> deliverOnMainQueue).startStandalone(next: { _, accounts in
@@ -3801,7 +3801,7 @@ index ecd7a3c9..5c4ec19a 100644
          fatalError("init(coder:) has not been implemented")
      }
 diff --git a/submodules/TelegramUI/Components/Gifts/GiftSetupScreen/Sources/GiftSetupScreen.swift b/submodules/TelegramUI/Components/Gifts/GiftSetupScreen/Sources/GiftSetupScreen.swift
-index e1624f68..43804f90 100644
+index e1624f68..c2b5ceb6 100644
 --- a/submodules/TelegramUI/Components/Gifts/GiftSetupScreen/Sources/GiftSetupScreen.swift
 +++ b/submodules/TelegramUI/Components/Gifts/GiftSetupScreen/Sources/GiftSetupScreen.swift
 @@ -49,6 +49,7 @@ private final class GiftSetupScreenComponent: Component {
@@ -3927,7 +3927,7 @@ index e1624f68..43804f90 100644
                              }
                              navigationController.setViewControllers(controllers, animated: true)
 +                            if localSend != nil {
-+                                Queue.mainQueue().after(0.35) { [weak navigationController] in
++                                Queue.mainQueue().after(0.35) { [weak navigationController = navigationController] in
 +                                    guard let navigationController else { return }
 +                                    navigationController.view.addSubview(ConfettiView(frame: navigationController.view.bounds))
 +                                }
@@ -4088,7 +4088,7 @@ index 91c2a2b6..eb0b756b 100644
                                          starsTopUpOptions: starsTopUpOptions,
                                          buyGift: buyGift,
 diff --git a/submodules/TelegramUI/Components/Gifts/GiftViewScreen/Sources/GiftViewScreen.swift b/submodules/TelegramUI/Components/Gifts/GiftViewScreen/Sources/GiftViewScreen.swift
-index 57947333..d6552923 100644
+index 57947333..85f0ab0f 100644
 --- a/submodules/TelegramUI/Components/Gifts/GiftViewScreen/Sources/GiftViewScreen.swift
 +++ b/submodules/TelegramUI/Components/Gifts/GiftViewScreen/Sources/GiftViewScreen.swift
 @@ -1011,6 +1011,7 @@ private final class GiftViewSheetContent: CombinedComponent {
@@ -4227,7 +4227,7 @@ index 57947333..d6552923 100644
                              controller.dismissAnimated()
 -                            
 -                            navigationController.view.addSubview(ConfettiView(frame: navigationController.view.bounds))
-+                            Queue.mainQueue().after(isLocalPurchase ? 0.35 : 0.0) { [weak navigationController] in
++                            Queue.mainQueue().after(isLocalPurchase ? 0.35 : 0.0) { [weak navigationController = navigationController] in
 +                                guard let navigationController else { return }
 +                                navigationController.view.addSubview(ConfettiView(frame: navigationController.view.bounds))
 +                            }
@@ -4245,7 +4245,7 @@ index 57947333..d6552923 100644
                                  controllers.append(chatController)
                                  navigationController.setViewControllers(controllers, animated: true)
 +                                if isLocalPurchase {
-+                                    Queue.mainQueue().after(0.35) { [weak navigationController] in
++                                    Queue.mainQueue().after(0.35) { [weak navigationController = navigationController] in
 +                                        guard let navigationController else { return }
 +                                        navigationController.view.addSubview(ConfettiView(frame: navigationController.view.bounds))
 +                                    }
